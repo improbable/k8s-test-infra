@@ -71,6 +71,13 @@ func TestJiraLink(t *testing.T) {
 			labelsAddedOverall: []string{jiraPrefix + "TEST"},
 			shouldComment:      false,
 		},
+		{
+			name:               "two tickets in the title",
+			title:              "TEST-32 fix every bug and fixes TEST-303",
+			hasLabels:          []string{jiraPrefix + "TEST"},
+			labelsAddedOverall: []string{jiraPrefix + "TEST"},
+			shouldComment:      false,
+		},
 	} {
 		fc := &fakegithub.FakeClient{
 			IssueComments: make(map[int][]github.IssueComment),
