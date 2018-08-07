@@ -18,7 +18,12 @@ const (
 )
 
 var (
-	jiraRegex = regexp.MustCompile("([A-Z]+)-\\d+")
+	jiraRegex     = regexp.MustCompile("([A-Z]+)-\\d+")
+	enabledEvents = []github.PullRequestEventAction{
+		github.PullRequestActionOpened,
+		github.PullRequestActionEdited,
+		github.PullRequestActionReopened,
+	}
 )
 
 type githubClient interface {
@@ -45,6 +50,19 @@ func pullRequestHandler(pc plugins.PluginClient, event github.PullRequestEvent) 
 }
 
 func handle(gc githubClient, log *logrus.Entry, config plugins.JiraLinker, event *github.PullRequestEvent) error {
+	// We only care about certain events, so ignore others - this significantly limits the number of race conditions
+	//  that can cause a double comment
+	relevantEvent := false
+	for _, candidate := range enabledEvents {
+		if event.Action == candidate {
+			relevantEvent = true
+		}
+	}
+
+	if !relevantEvent {
+		return nil
+	}
+
 	org := event.Repo.Owner.Login
 	repo := event.Repo.Name
 
