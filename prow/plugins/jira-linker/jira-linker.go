@@ -70,8 +70,8 @@ func handle(gc githubClient, log *logrus.Entry, config plugins.JiraLinker, event
 		}
 
 		if !hasLabel {
-			gc.AddLabel(org, repo, event.Number, jiraLabel(jiraTeamName))
 			gc.CreateComment(org, repo, event.Number, commentForTicket(jiraLink(config.JiraBaseUrl, ticketName)))
+			gc.AddLabel(org, repo, event.Number, jiraLabel(jiraTeamName))
 		}
 	} else {
 		hasNoJiraLabel := false
