@@ -1,12 +1,14 @@
 package jira_linker
 
 import (
-	"strings"
 	"regexp"
-	"k8s.io/test-infra/prow/plugins"
-	"k8s.io/test-infra/prow/pluginhelp"
-	"k8s.io/test-infra/prow/github"
+	"strings"
+
 	"github.com/sirupsen/logrus"
+
+	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/pluginhelp"
+	"k8s.io/test-infra/prow/plugins"
 )
 
 const (
@@ -16,7 +18,7 @@ const (
 )
 
 var (
-	jiraRegex       = regexp.MustCompile("([A-Z]+)-\\d+")
+	jiraRegex = regexp.MustCompile("([A-Z]+)-\\d+")
 )
 
 type githubClient interface {
@@ -25,7 +27,6 @@ type githubClient interface {
 	RemoveLabel(owner, repo string, number int, label string) error
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
 }
-
 
 func helpProvider(_ *plugins.Configuration, _ []string) (*pluginhelp.PluginHelp, error) {
 	// The Config field is omitted because this plugin is not configurable.
