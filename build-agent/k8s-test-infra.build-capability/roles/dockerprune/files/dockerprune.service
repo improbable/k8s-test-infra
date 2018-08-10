@@ -1,0 +1,10 @@
+[Unit]
+Description=prune docker to prevent full disk
+
+[Service]
+ExecStart=/usr/bin/docker system prune --force
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target
+Alias=dockerprune.service

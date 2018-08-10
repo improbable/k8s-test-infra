@@ -1,0 +1,105 @@
+---
+command:
+  systemctl list-timers --all | grep dockerprune:
+    exit-status: 0
+    stdout:
+    - "05:00:00 UTC"
+    stderr: []
+    timeout: 1000
+  systemctl status dockerprune.timer:
+    exit-status: 0
+    stdout:
+    - "dockerprune.timer - timer to prune docker regularly to prevent full disk"
+    - "Loaded: loaded (/etc/systemd/system/dockerprune.timer; enabled; vendor preset:
+      enabled)"
+    - "Active: active (waiting) since"
+    stderr: []
+    timeout: 1000
+
+file:
+  /etc/buildkite-agent/buildkite-agent.cfg:
+    exists: true
+    mode: "0600"
+    group: buildkite-agent
+    owner: buildkite-agent
+    filetype: file
+    contains:
+      - /^tags.*capable_of_building=.+,/
+      - /^tags.*docker=.+,/
+      - /^tags.*golang=.+/
+  /etc/sysctl.conf:
+    exists: true
+    mode: "0644"
+    owner: root
+    group: root
+    filetype: file
+    contains: []
+  /etc/systemd/system/dockerprune.service:
+    exists: true
+    mode: "0644"
+    owner: root
+    group: root
+    filetype: file
+    contains:
+      - "ExecStart=/usr/bin/docker system prune --force"
+      - "StandardOutput=journal"
+  /etc/systemd/system/dockerprune.timer:
+    exists: true
+    mode: "0644"
+    owner: root
+    group: root
+    filetype: file
+    contains:
+      - "OnCalendar=*-*-* 05:00:00"
+      - "Unit=dockerprune.service"
+  /usr/bin/go:
+    exists: true
+    mode: "0777"
+    owner: root
+    group: root
+    linked-to: ../lib/go-1.10/bin/go
+    filetype: symlink
+    contains: []
+  /usr/lib/go-1.10/bin/go:
+    exists: true
+    mode: "0755"
+    owner: root
+    group: root
+    filetype: file
+    contains: []
+
+group:
+  docker:
+    exists: true
+
+package:
+  docker-ce:
+    installed: true
+    versions:
+    - 17.03.1~ce-0~ubuntu-xenial
+  git:
+    installed: true
+    versions:
+    - 1:2.7.4-0ubuntu1.4
+  git-crypt:
+    installed: true
+    versions:
+    - 0.5.0-1
+  golang-go:
+    installed: true
+    versions:
+    - 2:1.10~1ubuntu3~longsleep1+xenial
+
+service:
+  docker:
+    enabled: true
+    running: true
+
+user:
+  buildkite-agent:
+    exists: true
+    groups:
+    - buildkite-agent
+    - docker
+    home: /var/lib/buildkite-agent
+    shell: ""

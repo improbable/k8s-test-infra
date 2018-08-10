@@ -1,0 +1,22 @@
+---
+- name: set up dockerprune systemd unit file
+  copy:
+    src: dockerprune.service
+    dest: /etc/systemd/system/dockerprune.service
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: set up dockerprune systemd timer file
+  copy:
+    src: dockerprune.timer
+    dest: /etc/systemd/system/dockerprune.timer
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: dockerprune timer
+  systemd:
+    name: dockerprune.timer
+    state: started
+    enabled: yes
