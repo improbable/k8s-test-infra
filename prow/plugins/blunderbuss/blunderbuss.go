@@ -29,10 +29,17 @@ import (
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
 	"k8s.io/test-infra/prow/plugins/assign"
+	"regexp"
 )
 
 const (
 	pluginName = "blunderbuss"
+)
+
+var (
+	autoAssignRe    = regexp.MustCompile(`(?mi)^/assign-reviewers$`)
+	noAutoAssignRe  = regexp.MustCompile(`(?mi)^/no-assign-reviewers$`)
+	noAssignTitleRe = regexp.MustCompile(`(?i)^\W?WIP\W`)
 )
 
 func init() {
@@ -50,13 +57,27 @@ func helpProvider(config *plugins.Configuration, enabledRepos []string) (*plugin
 	if reviewCount != 1 {
 		pluralSuffix = "s"
 	}
-	// Omit the fields [WhoCanUse, Usage, Examples] because this plugin is not triggered by human actions.
-	return &pluginhelp.PluginHelp{
-			Description: "The blunderbuss plugin automatically requests reviews from reviewers when a new PR is created. The reviewers are selected based on the reviewers specified in the OWNERS files that apply to the files modified by the PR.",
-			Config: map[string]string{
-				"": fmt.Sprintf("Blunderbuss is currently configured to request reviews from %d reviewer%s.", reviewCount, pluralSuffix),
-			},
+	pluginHelp := &pluginhelp.PluginHelp{
+		Description: "The blunderbuss plugin automatically requests reviews from reviewers when a new PR is created. The reviewers are selected based on the reviewers specified in the OWNERS files that apply to the files modified by the PR.",
+		Config: map[string]string{
+			"": fmt.Sprintf("Blunderbuss is currently configured to request reviews from %d reviewer%s.", reviewCount, pluralSuffix),
 		},
+	}
+	pluginHelp.AddCommand(pluginhelp.Command{
+		Usage:       "/no-assign-reviewers",
+		Featured:    false,
+		Description: "When in the initial PR opening message, prevents the automatic assignment of reviewers.",
+		Examples:    []string{"/no-assign-reviewers"},
+		WhoCanUse:   "Anyone",
+	})
+	pluginHelp.AddCommand(pluginhelp.Command{
+		Usage:       "/assign-reviewers",
+		Featured:    false,
+		Description: "Runs (or re-runs) the automatic reviewer assignment process, potentially adding (but not removing) reviewers.",
+		Examples:    []string{"/assign-reviewers"},
+		WhoCanUse:   "Anyone",
+	})
+	return pluginHelp,
 		nil
 }
 
@@ -95,8 +116,24 @@ type githubClient interface {
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
 }
 
+// Conditions for not assigning:
+// If the initial message:
+//  - Not WIP
+//  - No explicit `/[un]cc`
+//  - No `/no-assign-reviewers`
+// Otherwise:
+//  - Explicit `/assign-reviewers`
 func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) error {
-	if pre.Action != github.PullRequestActionOpened || assign.CCRegexp.MatchString(pre.PullRequest.Body) {
+	body := pre.PullRequest.Body
+	justOpened := pre.Action == github.PullRequestActionOpened
+	noAssignTitle := noAssignTitleRe.MatchString(pre.PullRequest.Title)
+	noAssignBody := noAutoAssignRe.MatchString(body) || assign.CCRegexp.MatchString(body)
+
+	explicitPreventAssignment := noAssignTitle || noAssignBody
+	initialAssign := justOpened && !explicitPreventAssignment
+	followupAssign := !justOpened && autoAssignRe.MatchString(body)
+
+	if !initialAssign && !followupAssign {
 		return nil
 	}
 
