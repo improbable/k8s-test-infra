@@ -39,7 +39,7 @@ const (
 var (
 	autoAssignRe    = regexp.MustCompile(`(?mi)^/assign-reviewers$`)
 	noAutoAssignRe  = regexp.MustCompile(`(?mi)^/no-assign-reviewers$`)
-	noAssignTitleRe = regexp.MustCompile(`(?i)^\W?WIP\W`)
+	noAssignTitleRe = regexp.MustCompile(`(?i)(^\W?WIP\b|\[WIP\]|\(WIP\))`)
 )
 
 func init() {
