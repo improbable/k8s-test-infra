@@ -116,24 +116,8 @@ type githubClient interface {
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
 }
 
-// Conditions for not assigning:
-// If the initial message:
-//  - Not WIP
-//  - No explicit `/[un]cc`
-//  - No `/no-assign-reviewers`
-// Otherwise:
-//  - Explicit `/assign-reviewers`
 func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) error {
-	body := pre.PullRequest.Body
-	justOpened := pre.Action == github.PullRequestActionOpened
-	noAssignTitle := noAssignTitleRe.MatchString(pre.PullRequest.Title)
-	noAssignBody := noAutoAssignRe.MatchString(body) || assign.CCRegexp.MatchString(body)
-
-	explicitPreventAssignment := noAssignTitle || noAssignBody
-	initialAssign := justOpened && !explicitPreventAssignment
-	followupAssign := !justOpened && autoAssignRe.MatchString(body)
-
-	if !initialAssign && !followupAssign {
+	if !shouldAssignReviewers(pre.Action, pre.PullRequest.Title, pre.PullRequest.Body) {
 		return nil
 	}
 
@@ -151,6 +135,25 @@ func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) err
 		pc.PluginConfig.Blunderbuss.ExcludeApprovers,
 		&pre,
 	)
+}
+
+// Conditions for assigning:
+// If the initial message has:
+//  - No WIP title
+//  - No explicit `/[un]cc`
+//  - No `/no-assign-reviewers`
+// Otherwise:
+//  - Explicit `/assign-reviewers`
+//
+// i.e. in the initial message you must explicitly opt-out,
+//  in future messages you must explicitly opt-in.
+func shouldAssignReviewers(action github.PullRequestEventAction, title, body string) bool {
+	justOpened := action == github.PullRequestActionOpened
+	noAssignTitle := noAssignTitleRe.MatchString(title)
+	noAssignBody := noAutoAssignRe.MatchString(body) || assign.CCRegexp.MatchString(body)
+	explicitPreventAssignment := noAssignTitle || noAssignBody
+
+	return justOpened && !explicitPreventAssignment || !justOpened && autoAssignRe.MatchString(body)
 }
 
 func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount, oldReviewCount *int, maxReviewers int, excludeApprovers bool, pre *github.PullRequestEvent) error {
