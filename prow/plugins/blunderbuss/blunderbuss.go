@@ -44,6 +44,7 @@ var (
 
 func init() {
 	plugins.RegisterPullRequestHandler(pluginName, handlePullRequest, helpProvider)
+	plugins.RegisterReviewCommentEventHandler(pluginName, handleReviewComment, helpProvider)
 }
 
 func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
@@ -117,7 +118,7 @@ type githubClient interface {
 }
 
 func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) error {
-	if !shouldAssignReviewers(pre.Action, pre.PullRequest.Title, pre.PullRequest.Body) {
+	if !shouldAssignReviewers(pre.Action == github.PullRequestActionOpened, pre.PullRequest.Title, pre.PullRequest.Body) {
 		return nil
 	}
 
@@ -133,31 +134,48 @@ func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) err
 		pc.PluginConfig.Blunderbuss.FileWeightCount,
 		pc.PluginConfig.Blunderbuss.MaxReviewerCount,
 		pc.PluginConfig.Blunderbuss.ExcludeApprovers,
-		&pre,
+		&pre.Repo,
+		&pre.PullRequest,
 	)
 }
 
-// Conditions for assigning:
-// If the initial message has:
-//  - No WIP title
-//  - No explicit `/[un]cc`
-//  - No `/no-assign-reviewers`
-// Otherwise:
-//  - Explicit `/assign-reviewers`
-//
-// i.e. in the initial message you must explicitly opt-out,
-//  in future messages you must explicitly opt-in.
-func shouldAssignReviewers(action github.PullRequestEventAction, title, body string) bool {
-	justOpened := action == github.PullRequestActionOpened
+func handleReviewComment(pc plugins.PluginClient, rce github.ReviewCommentEvent) error {
+	if !shouldAssignReviewers(false, "", rce.Comment.Body) {
+		return nil
+	}
+
+	oc, err := pc.OwnersClient.LoadRepoOwners(rce.Repo.Owner.Login, rce.Repo.Name, rce.PullRequest.Base.Ref)
+	if err != nil {
+		return fmt.Errorf("error loading RepoOwners: %v", err)
+	}
+
+	return handle(
+		pc.GitHubClient,
+		oc, pc.Logger,
+		pc.PluginConfig.Blunderbuss.ReviewerCount,
+		pc.PluginConfig.Blunderbuss.FileWeightCount,
+		pc.PluginConfig.Blunderbuss.MaxReviewerCount,
+		pc.PluginConfig.Blunderbuss.ExcludeApprovers,
+		&rce.Repo,
+		&rce.PullRequest,
+	)
+}
+
+func shouldAssignReviewers(opened bool, title, body string) bool {
+	// Explicitly asking for an assignment overrides all other conditions
+	if autoAssignRe.MatchString(body) {
+		return true
+	}
+
 	noAssignTitle := noAssignTitleRe.MatchString(title)
 	noAssignBody := noAutoAssignRe.MatchString(body) || assign.CCRegexp.MatchString(body)
 	explicitPreventAssignment := noAssignTitle || noAssignBody
 
-	return justOpened && !explicitPreventAssignment || !justOpened && autoAssignRe.MatchString(body)
+	return opened && !explicitPreventAssignment
 }
 
-func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount, oldReviewCount *int, maxReviewers int, excludeApprovers bool, pre *github.PullRequestEvent) error {
-	changes, err := ghc.GetPullRequestChanges(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number)
+func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount, oldReviewCount *int, maxReviewers int, excludeApprovers bool, repo *github.Repo, pr *github.PullRequest) error {
+	changes, err := ghc.GetPullRequestChanges(repo.Owner.Login, repo.Name, pr.Number)
 	if err != nil {
 		return fmt.Errorf("error getting PR changes: %v", err)
 	}
@@ -166,9 +184,9 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount,
 	var requiredReviewers []string
 	switch {
 	case oldReviewCount != nil:
-		reviewers = getReviewersOld(log, oc, pre.PullRequest.User.Login, changes, *oldReviewCount)
+		reviewers = getReviewersOld(log, oc, pr.User.Login, changes, *oldReviewCount)
 	case reviewerCount != nil:
-		reviewers, requiredReviewers, err = getReviewers(oc, pre.PullRequest.User.Login, changes, *reviewerCount)
+		reviewers, requiredReviewers, err = getReviewers(oc, pr.User.Login, changes, *reviewerCount)
 		if err != nil {
 			return err
 		}
@@ -179,7 +197,7 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount,
 				// and approvers and the search might stop too early if it finds
 				// duplicates.
 				frc := fallbackReviewersClient{ownersClient: oc}
-				approvers, _, err := getReviewers(frc, pre.PullRequest.User.Login, changes, *reviewerCount)
+				approvers, _, err := getReviewers(frc, pr.User.Login, changes, *reviewerCount)
 				if err != nil {
 					return err
 				}
@@ -204,7 +222,7 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, reviewerCount,
 
 	if len(reviewers) > 0 {
 		log.Infof("Requesting reviews from users %s.", reviewers)
-		return ghc.RequestReview(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number, reviewers)
+		return ghc.RequestReview(repo.Owner.Login, repo.Name, pr.Number, reviewers)
 	}
 	return nil
 }
