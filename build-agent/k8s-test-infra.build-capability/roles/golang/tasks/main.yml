@@ -1,9 +1,0 @@
----
-- name: add longsleep/golang-backports apt repo
-  apt_repository:
-    repo: ppa:longsleep/golang-backports
-    update_cache: yes
-
-- name: install golang
-  apt:
-    name: "golang-go=2:{{ golang_version }}~1ubuntu3~longsleep1+xenial"

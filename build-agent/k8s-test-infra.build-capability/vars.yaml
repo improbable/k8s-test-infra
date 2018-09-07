@@ -1,8 +1,0 @@
----
-agent_configdir: "/etc/{{ agent_username }}"
-agent_homedir: "/var/lib/{{ agent_username }}"
-agent_username: "buildkite-agent"
-docker_package_name: "docker-ce={{ docker_version }}~ce-0~ubuntu-xenial" # find package names via `apt-cache madison docker-ce`
-docker_version: "17.03.1"
-environment_name: "staging"
-go_version: "1.10"
