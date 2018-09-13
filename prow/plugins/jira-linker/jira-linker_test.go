@@ -164,7 +164,7 @@ func TestJiraTicketRef(t *testing.T) {
 		{
 			// Title tickets should be higher priority than branches
 			prTitle:     "WIP JIRA-43 charge extra for condiments",
-			prBranch:    "feature/ENG-32-delete-everything",
+			prBranch:    "feature/eng-32-delete-everything",
 			shouldFind:  true,
 			ticketTitle: "JIRA-43",
 			ticketTeam:  "JIRA",

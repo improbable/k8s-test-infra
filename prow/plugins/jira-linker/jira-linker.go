@@ -19,7 +19,7 @@ const (
 
 var (
 	jiraTitleRegex  = regexp.MustCompile("([A-Z]+)-\\d+")
-	jiraBranchRegex = regexp.MustCompile("^\\w+/(([A-Z]+)-\\d+)(-|$)")
+	jiraBranchRegex = regexp.MustCompile("^\\w+/(([A-Za-z]+)-\\d+)(-|$|_)")
 	enabledEvents   = []github.PullRequestEventAction{
 		github.PullRequestActionOpened,
 		github.PullRequestActionEdited,
@@ -118,7 +118,7 @@ func extractJiraTicketDetails(title, ref string) (bool, string, string) {
 	}
 	matches = jiraBranchRegex.FindStringSubmatch(ref)
 	if len(matches) > 0 {
-		return true, matches[2], matches[1]
+		return true, strings.ToUpper(matches[2]), strings.ToUpper(matches[1])
 	}
 
 	return false, "", ""
