@@ -111,7 +111,7 @@ func handle(gc githubClient, log *logrus.Entry, config plugins.JiraLinker, event
 }
 
 // Returns if found, and if so respectively the ticket type (e.g. ENG) and the ticket ref (e.g. ENG-23)
-func extractJiraTicketDetails(title, ref string) (bool, string, string) {
+func extractJiraTicketDetails(title string, ref string) (bool, string, string) {
 	matches := jiraTitleRegex.FindStringSubmatch(title)
 	if len(matches) > 0 {
 		return true, matches[1], matches[0]
