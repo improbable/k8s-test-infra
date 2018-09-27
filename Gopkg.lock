@@ -894,6 +894,7 @@
     "codes",
     "connectivity",
     "credentials",
+    "credentials/oauth",
     "encoding",
     "grpclb/grpc_lb_v1/messages",
     "grpclog",
@@ -1176,6 +1177,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "5c0c8a007d7e8b55851e8d2207ef6799d8a93c06340c8197c3da4f597989ceec"
+  inputs-digest = "68d25f8ec3a1f4b5a793662beb9462393a1d60f4eeeea2c5d693c8752442fc90"
   solver-name = "gps-cdcl"
   solver-version = 1
