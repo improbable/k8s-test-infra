@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package improbable.cla;
+
+// Request to get the signed CLA for a given username
+message GetSignedCLARequest {
+  string githubUsername = 1;
+}
+
+// Response containing whether or not the user has signed the CLA
+message GetSignedCLAResponse {
+  bool hasSignedImprobableCLA = 1;
+}
+
+service CLAService {
+  rpc GetSignedCLA (GetSignedCLARequest) returns (GetSignedCLAResponse);
+}
