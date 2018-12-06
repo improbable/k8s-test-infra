@@ -27,13 +27,11 @@ import (
 
 // SecretAgent watches a path and automatically loads the secrets stored.
 type SecretAgent struct {
-	sync.Mutex
+	sync.RWMutex
 	secretsMap map[string][]byte
 }
 
-// Start will begin polling the secret file at the path. If the first load
-// fails, Start with return the error and abort. Future load failures will log
-// the failure message but continue attempting to load.
+// Start creates goroutines to monitor the files that contain the secret value.
 func (sa *SecretAgent) Start(paths []string) error {
 	secretsMap, err := LoadSecrets(paths)
 	if err != nil {
@@ -50,6 +48,9 @@ func (sa *SecretAgent) Start(paths []string) error {
 	return nil
 }
 
+// reloadSecret will begin polling the secret file at the path. If the first load
+// fails, Start with return the error and abort. Future load failures will log
+// the failure message but continue attempting to load.
 func (sa *SecretAgent) reloadSecret(secretPath string) {
 	var lastModTime time.Time
 	logger := logrus.NewEntry(logrus.StandardLogger())
@@ -77,20 +78,20 @@ func (sa *SecretAgent) reloadSecret(secretPath string) {
 			logger.WithField("secret-path: ", secretPath).
 				WithError(err).Error("Error loading secret.")
 		} else {
-			sa.SetSecret(secretPath, secretValue)
+			sa.setSecret(secretPath, secretValue)
 		}
 	}
 }
 
 // GetSecret returns the value of a secret stored in a map.
 func (sa *SecretAgent) GetSecret(secretPath string) []byte {
-	sa.Lock()
-	defer sa.Unlock()
+	sa.RLock()
+	defer sa.RUnlock()
 	return sa.secretsMap[secretPath]
 }
 
-// Set sets the map of secrets.
-func (sa *SecretAgent) SetSecret(secretPath string, secretValue []byte) {
+// setSecret sets a value in a map of secrets.
+func (sa *SecretAgent) setSecret(secretPath string, secretValue []byte) {
 	sa.Lock()
 	defer sa.Unlock()
 	sa.secretsMap[secretPath] = secretValue

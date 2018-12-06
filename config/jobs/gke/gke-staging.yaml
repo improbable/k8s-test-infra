@@ -1,6 +1,5 @@
 periodics:
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-default-parallel
   labels:
     preset-service-account: "true"
@@ -25,10 +24,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=80m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-default-serial
   labels:
     preset-service-account: "true"
@@ -52,10 +50,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=800m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-beta-parallel
   labels:
     preset-service-account: "true"
@@ -71,7 +68,7 @@ periodics:
       - --check-version-skew=false
       - --cluster=
       - --deployment=gke
-      - --extract=gke-latest-1.11
+      - --extract=gke-latest-1.12
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
@@ -80,38 +77,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=80m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
-  name: ci-kubernetes-e2e-gke-staging-beta-cos-containerd-parallel
-  labels:
-    preset-service-account: "true"
-    preset-k8s-ssh: "true"
-  spec:
-    containers:
-    - args:
-      - --timeout=100
-      - --bare
-      - --scenario=kubernetes_e2e
-      - --
-      - --check-leaked-resources
-      - --check-version-skew=false
-      - --cluster=
-      - --deployment=gke
-      - --extract=gke-latest-1.11
-      - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
-      - --gcp-node-image=cos_containerd
-      - --gcp-zone=us-central1-f
-      - --ginkgo-parallel
-      - --gke-environment=staging
-      - --provider=gke
-      - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --minStartupPods=8
-      - --timeout=80m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
-
-- interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-beta-serial
   labels:
     preset-service-account: "true"
@@ -127,7 +95,7 @@ periodics:
       - --check-version-skew=false
       - --cluster=
       - --deployment=gke
-      - --extract=gke-latest-1.11
+      - --extract=gke-latest-1.12
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
@@ -135,37 +103,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=600m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
-  name: ci-kubernetes-e2e-gke-staging-beta-cos-containerd-serial
-  labels:
-    preset-service-account: "true"
-    preset-k8s-ssh: "true"
-  spec:
-    containers:
-    - args:
-      - --timeout=620
-      - --bare
-      - --scenario=kubernetes_e2e
-      - --
-      - --check-leaked-resources
-      - --check-version-skew=false
-      - --cluster=
-      - --deployment=gke
-      - --extract=gke-latest-1.11
-      - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
-      - --gcp-node-image=cos_containerd
-      - --gcp-zone=us-central1-f
-      - --gke-environment=staging
-      - --provider=gke
-      - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --minStartupPods=8
-      - --timeout=600m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
-
-- interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-stable1-parallel
   labels:
     preset-service-account: "true"
@@ -181,7 +121,7 @@ periodics:
       - --check-version-skew=false
       - --cluster=
       - --deployment=gke
-      - --extract=gke-latest-1.10
+      - --extract=gke-latest-1.11
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
@@ -190,10 +130,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=80m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-stable1-serial
   labels:
     preset-service-account: "true"
@@ -209,7 +148,7 @@ periodics:
       - --check-version-skew=false
       - --cluster=
       - --deployment=gke
-      - --extract=gke-latest-1.10
+      - --extract=gke-latest-1.11
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
@@ -217,10 +156,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=600m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-stable2-parallel
   labels:
     preset-service-account: "true"
@@ -236,7 +174,7 @@ periodics:
       - --check-version-skew=false
       - --cluster=
       - --deployment=gke
-      - --extract=gke-latest-1.9
+      - --extract=gke-latest-1.10
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
@@ -245,10 +183,9 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=80m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-gke-staging-stable2-serial
   labels:
     preset-service-account: "true"
@@ -264,7 +201,7 @@ periodics:
       - --check-version-skew=false
       - --cluster=
       - --deployment=gke
-      - --extract=gke-latest-1.9
+      - --extract=gke-latest-1.10
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
@@ -272,59 +209,4 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --minStartupPods=8
       - --timeout=600m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
-
-- interval: 30m
-  agent: kubernetes
-  name: ci-kubernetes-e2e-gke-staging-stable3-parallel
-  labels:
-    preset-service-account: "true"
-    preset-k8s-ssh: "true"
-  spec:
-    containers:
-    - args:
-      - --timeout=100
-      - --bare
-      - --scenario=kubernetes_e2e
-      - --
-      - --check-leaked-resources
-      - --check-version-skew=false
-      - --cluster=
-      - --deployment=gke
-      - --extract=gke-latest-1.8
-      - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
-      - --gcp-node-image=gci
-      - --gcp-zone=us-central1-f
-      - --ginkgo-parallel
-      - --gke-environment=staging
-      - --provider=gke
-      - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --minStartupPods=8
-      - --timeout=80m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
-
-- interval: 30m
-  agent: kubernetes
-  name: ci-kubernetes-e2e-gke-staging-stable3-serial
-  labels:
-    preset-service-account: "true"
-    preset-k8s-ssh: "true"
-  spec:
-    containers:
-    - args:
-      - --timeout=620
-      - --bare
-      - --scenario=kubernetes_e2e
-      - --
-      - --check-leaked-resources
-      - --check-version-skew=false
-      - --cluster=
-      - --deployment=gke
-      - --extract=gke-latest-1.8
-      - --gcp-cloud-sdk=gs://cloud-sdk-testing/rc
-      - --gcp-node-image=gci
-      - --gcp-zone=us-central1-f
-      - --gke-environment=staging
-      - --provider=gke
-      - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --minStartupPods=8
-      - --timeout=600m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master

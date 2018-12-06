@@ -99,7 +99,7 @@ RUN curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID"
 # TODO(benthelder): update docker version. This is pinned because of
 # https://github.com/kubernetes/test-infra/issues/6187
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends docker-ce=17.09.1~ce-0~debian && \
+    apt-get install -y --no-install-recommends docker-ce=18.06.0* && \
     sed -i 's/cgroupfs_mount$/#cgroupfs_mount\n/' /etc/init.d/docker
 
 
@@ -123,5 +123,11 @@ COPY ["barnacle/barnacle", "/usr/local/bin/"]
 # .bazelrc files if bazel remote caching is enabled 
 COPY ["entrypoint.sh", "runner.sh", "create_bazel_cache_rcs.sh", \
         "/usr/local/bin/"]
+
+# TODO(krzyzacy): Move the scenario scripts to kubekins v2
+# The bundled scenarios are for podutil jobs, bootstrap jobs will still use
+# scenario scripts from cloned test-infra
+RUN mkdir /workspace/scenarios
+COPY ["./scenarios", "/workspace/scenarios"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
