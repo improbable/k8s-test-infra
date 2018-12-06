@@ -1,0 +1,37 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+
+filegroup(
+    name = "package-srcs",
+    srcs = glob(["**"]),
+    tags = ["automanaged"],
+    visibility = ["//visibility:private"],
+)
+
+filegroup(
+    name = "all-srcs",
+    srcs = [":package-srcs"],
+    tags = ["automanaged"],
+    visibility = ["//visibility:public"],
+)
+
+proto_library(
+    name = "improbable_cla_proto",
+    srcs = ["cla.proto"],
+    visibility = ["//visibility:public"],
+)
+
+go_proto_library(
+    name = "improbable_cla_go_proto",
+    compilers = ["@io_bazel_rules_go//proto:go_grpc"],
+    importpath = "k8s.io/test-infra/proto/cla",
+    proto = ":improbable_cla_proto",
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "go_default_library",
+    embed = [":improbable_cla_go_proto"],
+    importpath = "k8s.io/test-infra/proto/cla",
+    visibility = ["//visibility:public"],
+)
