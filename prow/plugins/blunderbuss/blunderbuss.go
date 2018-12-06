@@ -119,7 +119,7 @@ type githubClient interface {
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
 }
 
-func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) error {
+func handlePullRequest(pc plugins.Agent, pre github.PullRequestEvent) error {
 	if !shouldAssignReviewers(pre.Action == github.PullRequestActionOpened, pre.PullRequest.Title, pre.PullRequest.Body) {
 		return nil
 	}
@@ -141,7 +141,7 @@ func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) err
 	)
 }
 
-func handleReviewComment(pc plugins.PluginClient, rce github.ReviewCommentEvent) error {
+func handleReviewComment(pc plugins.Agent, rce github.ReviewCommentEvent) error {
 	if !shouldAssignReviewers(false, "", rce.Comment.Body) {
 		return nil
 	}

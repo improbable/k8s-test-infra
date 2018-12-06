@@ -10,7 +10,7 @@ load(
 
 container_bundle(
     name = "release-hook",
-    images = prow_tags(
+    images = tags(
         "hook",
     ),
     stamp = True,

@@ -37,6 +37,7 @@ import (
 	"k8s.io/test-infra/prow/metrics"
 	pluginhelp "k8s.io/test-infra/prow/pluginhelp/hook"
 	"k8s.io/test-infra/prow/plugins"
+	"k8s.io/test-infra/prow/repoowners"
 	"k8s.io/test-infra/prow/slack"
 )
 
@@ -140,6 +141,12 @@ func main() {
 		slackClient = slack.NewFakeClient()
 	}
 
+	pluginAgent := &plugins.ConfigAgent{}
+
+	ownersClient := repoowners.NewClient(
+		gitClient, githubClient, configAgent.Config(), pluginAgent.Config().MDYAMLEnabled, pluginAgent.Config().SkipCollaborators,
+	)
+
 	clientAgent := &plugins.ClientAgent{
 		GitHubClient: githubClient,
 		KubeClient:   kubeClient,
@@ -147,7 +154,6 @@ func main() {
 		SlackClient:  slackClient,
 	}
 
-	pluginAgent := &plugins.ConfigAgent{}
 	if err := pluginAgent.Start(o.pluginConfig); err != nil {
 		logrus.WithError(err).Fatal("Error starting plugins.")
 	}
