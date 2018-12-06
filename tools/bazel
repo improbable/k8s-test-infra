@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# See https://brevi.link/shell-style and https://explainshell.com
+## This is a bazel script to ensure that the currently executed version of bazel is the REQUIRED version in the WORKSPACE file.
+##
+## Usage:
+##  This is used by bazel when any bazel command is called.
+##  It is the same as the copy in the everything repo.
+##
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib/setup.sh" || exit 1
+
+TOOLS_DIR="$(dirname "$0")"
+
+source "${TOOLS_DIR}"/lib/os.sh
+
+# All information required for the script to select or, if necessary, install bazel is contained
+# in this code block.
+# If a higher version of bazel is required, update `REQUIRED_BAZEL_VERSION` and the
+# `REQUIRED_BAZEL_SHA256` values for each platform.
+REQUIRED_BAZEL_VERSION="0.19.0"
+BAZEL_INSTALLATION_DIR="${HOME}/.bazel_installations/${REQUIRED_BAZEL_VERSION}"
+if isLinux; then
+  REQUIRED_BAZEL_SHA256="001371df816005e907670f483f810ee935176bdc811a5ffa2314c59766b68ec4"
+  REQUIRED_BAZEL_SHA256CMD="sha256sum"
+  DOWNLOAD_CMD="wget -q -O bazel"
+  BAZEL_EXE="bazel-${REQUIRED_BAZEL_VERSION}-linux-x86_64"
+elif isMacOS; then
+  REQUIRED_BAZEL_SHA256="115c1dfffda21e983010d3b4b7cb3697b71d70ece4e52859005795b26b1d4c9a"
+  REQUIRED_BAZEL_SHA256CMD="shasum -a 256"
+  DOWNLOAD_CMD="wget -q -O bazel"
+  BAZEL_EXE="bazel-${REQUIRED_BAZEL_VERSION}-darwin-x86_64"
+else
+  REQUIRED_BAZEL_SHA256="cf4a7bf879dfe2801d59456c6658efb0f862ec1dbe1038ba837e8ef7168fcc1d"
+  REQUIRED_BAZEL_SHA256CMD="sha256sum"
+  DOWNLOAD_CMD="curl -L -s -o bazel"
+  # Windows does not have an installer but retrieves the executable directly.
+  BAZEL_EXE="bazel-${REQUIRED_BAZEL_VERSION}-windows-x86_64.exe"
+fi
+
+BAZEL_TARGET_PATH="${BAZEL_INSTALLATION_DIR}/bin/bazel"
+
+# Check if correct version is already installed.
+if [ -x "${BAZEL_TARGET_PATH}" ]; then
+  exec -a "$0" "${BAZEL_TARGET_PATH}" "$@"
+fi
+
+cat << EOM
+=================================================
+Bazel version ${REQUIRED_BAZEL_VERSION} is not
+installed under ~/.bazel_installations
+
+Installing bazel ${REQUIRED_BAZEL_VERSION} now...
+=================================================
+EOM
+
+# Create root directory if needed.
+if [ ! -d "${BAZEL_INSTALLATION_DIR}" ]; then
+  echo "Installation directory created."
+  mkdir -p "${BAZEL_INSTALLATION_DIR}"
+fi
+
+function _are_checksums_equal() {
+  CHECKSUM_A=$1
+  CHECKSUM_B=$2
+  # Split apart the checksum from the file name by splitting the returned string by the contained
+  # space; the checksum has the format:
+  # xxxxxx...xxxxx <filename>
+  CHECKSUM_A_PARTS=(${CHECKSUM_A})
+  CHECKSUM_B_PARTS=(${CHECKSUM_B})
+
+  if [[ "${CHECKSUM_A_PARTS[0]}" == "${CHECKSUM_B_PARTS[0]}" ]]; then
+    return 0 # True
+  else
+    return 1 # False
+  fi
+}
+
+# Install correct bazel version.
+# If we don't have a local Bazel install at this point we need to retrieve the right version from GitHub.
+mkdir -p "${BAZEL_INSTALLATION_DIR}/bin"
+pushd "${BAZEL_INSTALLATION_DIR}/bin"
+echo "Starting download of bazel ${REQUIRED_BAZEL_VERSION}..."
+${DOWNLOAD_CMD} "https://github.com/bazelbuild/bazel/releases/download/${REQUIRED_BAZEL_VERSION}/${BAZEL_EXE}"
+echo "Download finished."
+echo "Testing download file integrity..."
+CALCULATED_CHECKSUM="$(${REQUIRED_BAZEL_SHA256CMD} bazel)"
+if ! _are_checksums_equal "${CALCULATED_CHECKSUM}" "${REQUIRED_BAZEL_SHA256}"; then
+  cat <<EOM
+  ABORT - Downloaded Bazel failed the SHA-256 hash check.
+  ABORT - Expected: ${REQUIRED_BAZEL_SHA256}  bazel
+  ABORT - Found:    ${CALCULATED_CHECKSUM}
+EOM
+  exit 1
+fi
+
+if [ -f "${BAZEL_TARGET_PATH}" ]; then
+  chmod a+x "${BAZEL_TARGET_PATH}"
+
+  if [ ! -x "${BAZEL_TARGET_PATH}" ]; then
+    echo "Couldn't mark bazel binary as executable."
+    echo "$(ls -l ${BAZEL_TARGET_PATH})"
+    exit 1
+  fi
+else
+  echo "Couldn't install bazel properly - executable doesn't exist."
+  echo "$(ls -l ${BAZEL_TARGET_PATH})"
+  exit 1
+fi
+popd
+
+echo "Executing downloaded bazel..."
+exec -a "$0" "${BAZEL_TARGET_PATH}" "$@"

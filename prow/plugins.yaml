@@ -5,6 +5,8 @@
 triggers:
 - repos:
   - kubernetes
+  - kubernetes-client
+  - kubernetes-csi
   - kubernetes-incubator
   - kubernetes-security
   - kubernetes-sigs
@@ -27,26 +29,33 @@ triggers:
   join_org_url: "https://github.com/tensorflow/minigo/blob/master/CONTRIBUTING.md"
 - repos:
   - bazelbuild
+
 owners:
   mdyamlrepos:
   - kubernetes/website
+  skip_collaborators:
+  - kubernetes-sigs/contributor-playground
+  - helm/charts
 
 approve:
 - repos:
+  - kubernetes/cloud-provider-aws
+  - kubernetes/cloud-provider-azure
   - kubernetes/cluster-registry
   - kubernetes/contrib
   - kubernetes/dashboard
+  - kubernetes/dns
+  - kubernetes/enhancements
   - kubernetes/examples
-  - kubernetes/features
   - kubernetes/federation
   - kubernetes/gengo
-  - kubernetes/heapster
+  - kubernetes/ingress-gce
   - kubernetes/ingress-nginx
+  - kubernetes/klog
   - kubernetes/kops
   - kubernetes/kube-deploy
   - kubernetes/kubeadm
   - kubernetes/kubectl
-  - kubernetes/kubernetes
   - kubernetes/kubernetes-template-project
   - kubernetes/kube-state-metrics
   - kubernetes/minikube
@@ -58,9 +67,14 @@ approve:
   - kubernetes/sig-release
   - kubernetes/steering
   - kubernetes/test-infra
+  - kubernetes/utils
+  - kubernetes-incubator/ip-masq-agent
   implicit_self_approve: true
   lgtm_acts_as_approve: true
 - repos:
+  - kubernetes/kubernetes
+  - kubernetes-client
+  - kubernetes-csi
   - kubernetes-sigs
   - client-go/unofficial-docs
   implicit_self_approve: true
@@ -85,6 +99,9 @@ lgtm:
 - repos:
   - bazelbuild
   review_acts_as_lgtm: true
+- repos:
+  - kubernetes/test-infra
+  store_tree_hash: true
 
 blockades:
 - repos:
@@ -117,17 +134,21 @@ blockades:
   - kubernetes/community
   blockregexps:
   - ^events/2016
+  - ^events/2017
   - ^events/elections/2017
+  - ^events/elections/2018
   explanation: "These files are historical, and from events that have already occurred."
+- repos:
+  - kubernetes/community
+  blockregexps:
+  - ^keps/
+  explanation: "KEPs have been relocated to [kubernetes/enhancements](https://git.k8s.io/enhancements/)! Please submit any updates there."
 
 blunderbuss:
   max_request_count: 2
 
 cat:
   key_path: /etc/cat-api/api-key
-heart:
-  adorees:
-  - k8s-merge-robot
 
 slack:
   mergewarnings:
@@ -144,7 +165,6 @@ slack:
     - kubernetes-dev
     whitelist:
     - k8s-ci-robot # future home of tide
-    - k8s-merge-robot # submit queue
     - k8s-release-robot # anago
     branch_whitelist:
         release-1.8:
@@ -155,6 +175,12 @@ slack:
             - maciekpytel # 1.10 patch release manager
         release-1.11:
             - foxish # 1.11 patch release manager
+        release-1.12:
+            - feiskyer # 1.12 patch release manager
+        release-1.13:
+            - dougm # 1.13 branch manager
+            - hoegaarden # 1.13 branch manager shadow
+            - idealhack # 1.13 branch manager shadow
         feature-serverside-apply:
             - lavalamp # feature-serverside-apply "branch manager"
             - apelisse # feature-serverside-apply "branch manager"
@@ -185,8 +211,55 @@ config_updater:
     config/jobs/**/*.yaml:
       name: job-config
 
+welcome:
+- repos:
+  - kubernetes/test-infra
+  message_template: "Welcome @{{.AuthorLogin}}! It looks like this is your first PR to {{.Org}}/{{.Repo}} 🎉🎉"
+
+require_matching_label:
+- missing_label: needs-kind
+  org: kubernetes
+  repo: kubernetes
+  prs: true
+  regexp: ^kind/
+- missing_label: needs-sig
+  org: kubernetes
+  repo: kubernetes
+  prs: true
+  regexp: ^(sig|wg|committee)/
+  # Define needs-sig separately for issues so that we only comment on issues.
+- missing_label: needs-sig
+  org: kubernetes
+  repo: kubernetes
+  issues: true
+  regexp: ^(sig|wg|committee)/
+  missing_comment: |
+    There are no sig labels on this issue. Please add a sig label by either:
+
+    1. mentioning a sig: `@kubernetes/sig-<group-name>-<group-suffix>`
+        e.g., `@kubernetes/sig-contributor-experience-<group-suffix>` to notify the contributor experience sig, OR
+
+    2. specifying the label manually: `/sig <group-name>`
+        e.g., `/sig scalability` to apply the `sig/scalability` label
+
+    Note: Method 1 will trigger an email to the group. See the [group list](https://git.k8s.io/community/sig-list.md).
+    The `<group-suffix>` in method 1 has to be replaced with one of these: _**bugs, feature-requests, pr-reviews, test-failures, proposals**_.
+- missing_label: needs-priority
+  org: kubernetes
+  repo: kubernetes
+  prs: true
+  regexp: ^priority/
+- missing_label: needs-kind
+  org: kubernetes
+  repo: cloud-provider-aws
+  prs: true
+  regexp: ^kind/
+
+
 plugins:
-  bazelbuild/rules_k8s:
+  # Enable the following for any bazelbuild repo (rules_k8s, rules_docker) that sends prow webhooks
+  # Repos that do not send prow webhooks will see no effect.
+  bazelbuild:
   - approve  # Allow OWNERS to /approve
   - assign  # Allow /assign and /cc
   - blunderbuss  # Auto-assign people
@@ -199,6 +272,7 @@ plugins:
   - override
   - size  # Auto-label size of PR
   - trigger  # Allow people to configure CI jobs to /test
+  - verify-owners # Validates OWNERS file changes in PRs.
   - wip  # Auto-hold PRs with WIP in title
   - yuks # Let prow tell a /joke
 
@@ -206,22 +280,19 @@ plugins:
   - trigger
 
   kubeflow:
-    # Enable /approve and /assign commands.
-    - approve
-    - assign
-    - blunderbuss
-    - help
-    - hold
-    - label
-    - lgtm
-    # Lets PRs & issues be flagged as stale
-    - lifecycle
-    - size
-    # Allows cleaning up stale commit statuses
-    - skip
-    # Applies a label to PRs with wip in the title to block merge
-    - wip
-    - trigger
+  - approve   # Enable /approve and /assign commands.
+  - assign
+  - blunderbuss
+  - help
+  - hold
+  - label
+  - lgtm
+  - lifecycle   # Lets PRs & issues be flagged as stale
+  - size
+  - skip  # Allows cleaning up stale commit statuses
+  - verify-owners   # Validates OWNERS file changes in PRs.
+  - wip   # Applies a label to PRs with wip in the title to block merge
+  - trigger
 
   helm/charts:
   - approve
@@ -231,179 +302,12 @@ plugins:
   - hold
   - lgtm
   - trigger
-
-  kubernetes/client-go:
-  - approve
-
-  kubernetes/cloud-provider-aws:
-  - approve
-  - blunderbuss
-  - trigger
-
-  kubernetes/cloud-provider-azure:
-  - approve
-  - blunderbuss
-  - trigger
-
-  kubernetes/cloud-provider-gcp:
-  - approve
-  - blunderbuss
-  - trigger
-
-  kubernetes/cloud-provider-openstack:
-  - approve
-  - blunderbuss
-  - trigger
-
-  kubernetes/cloud-provider-vsphere:
-  - approve
-  - blunderbuss
-  - trigger
-
-  kubernetes/cluster-registry:
-  - approve
-  - trigger
-
-  kubernetes/community:
-  - approve
-  - blunderbuss
-  - blockade
-  - owners-label
-  - require-sig
-  - trigger
-
-  kubernetes/contrib:
-  - approve
-  - blunderbuss
-
-  kubernetes/dashboard:
-  - approve
-
-  kubernetes/dns:
-  - trigger
-
-  kubernetes/examples:
-  - trigger
-  - approve
-
-  kubernetes/features:
-  - approve
-  - stage
-
-  kubernetes/ingress-gce:
-  - trigger
-
-  kubernetes/ingress-nginx:
-  - approve
-
-  kubernetes/federation:
-  - trigger
-  - approve
-
-  kubernetes/gengo:
-  - approve
-
-  kubernetes/heapster:
-  - approve
-  - blunderbuss
-  - trigger
-
-  kubernetes/kops:
-  - trigger
-  - approve
-
-  kubernetes/kube-deploy:
-  - approve
-  - blunderbuss
-
-  kubernetes/kubeadm:
-  - approve
-
-  kubernetes/kubectl:
-  - approve
-
-  kubernetes/kubernetes:
-  - approve
-  - blockade
-  - blunderbuss
-  - docs-no-retest
-  - milestone
-  - milestonestatus
-  - owners-label
-  - release-note
-  - require-sig
-  - trigger
-
-  kubernetes/kubernetes-docs-ja:
-  - approve
-  - blunderbuss
-
-  kubernetes/kubernetes-docs-ko:
-  - approve
-  - blunderbuss
-
-  kubernetes/kubernetes-template-project:
-  - approve
-
-  kubernetes/kube-openapi:
-  - approve
-  - blunderbuss
-
-  kubernetes/kube-state-metrics:
-  - approve
-  - blunderbuss
-
-  kubernetes/minikube:
-  - approve
-
-  kubernetes/node-problem-detector:
-  - approve
-  - blunderbuss
-
-  kubernetes/org:
-  - approve
-  - blunderbuss
-  - owners-label
-  - require-sig
-
-  kubernetes/perf-tests:
-  - approve
-  - blunderbuss
-
-  kubernetes/publishing-bot:
-  - approve
-  - blunderbuss
-
-  kubernetes/release:
-  - approve
-  - trigger
-
-  kubernetes/repo-infra:
-  - approve
-
-  kubernetes/sig-release:
-  - approve
-  - blunderbuss
-  - stage
-
-  kubernetes/steering:
-  - approve
-
-  kubernetes/test-infra:
-  - approve
-  - blunderbuss
-  - config-updater
-  - milestone
-  - override
-  - trigger
   - verify-owners
 
-  kubernetes/website:
-  - approve
-  - blunderbuss
-
   kubernetes:
+  - approve
   - assign
+  - blunderbuss
   - cat
   - cla
   - dog
@@ -419,40 +323,173 @@ plugins:
   - size
   - skip
   - slackevents
+  - verify-owners
   - wip
   - yuks
 
-  kubernetes-incubator:
-  - assign
-  - cla
-  - label
-  - lgtm
-  - lifecycle
-  - size
+  kubernetes/cloud-provider-aws:
+  - milestone
+  - milestonestatus
+  - owners-label
+  - release-note
+  - require-matching-label
+  - welcome
+  - trigger
+
+  kubernetes/cloud-provider-azure:
+  - trigger
+
+  kubernetes/cloud-provider-gcp:
+  - trigger
+
+  kubernetes/cloud-provider-openstack:
+  - trigger
+  - override
+
+  kubernetes/cloud-provider-vsphere:
+  - trigger
+
+  kubernetes/cluster-registry:
+  - trigger
+
+  kubernetes/community:
+  - blockade
+  - owners-label
+  - require-sig
+  - trigger
+
+  kubernetes/dns:
+  - trigger
+
+  kubernetes/enhancements:
+  - blockade
+  - milestone
+  - owners-label
+  - require-sig
+  - stage
+
+  kubernetes/examples:
+  - trigger
+
+  kubernetes/ingress-gce:
+  - trigger
+
+  kubernetes/federation:
+  - trigger
+
+  kubernetes/kops:
+  - trigger
+
+  kubernetes/kubernetes:
+  - blockade
+  - cherry-pick-unapproved
+  - milestone
+  - milestonestatus
+  - owners-label
+  - release-note
+  - require-matching-label
+  - trigger
+
+  kubernetes/org:
+  - owners-label
+  - trigger
+
+  kubernetes/perf-tests:
+  - trigger
+
+  kubernetes/publishing-bot:
+  - trigger
+
+  kubernetes/release:
+  - trigger
+
+  kubernetes/sig-release:
+  - blockade
+  - owners-label
+  - stage
+
+  kubernetes/test-infra:
+  - config-updater
+  - milestone
+  - owners-label
+  - override
+  - trigger
+  - welcome
+
+  kubernetes/website:
+  - owners-label
 
   kubernetes-client:
+  - approve
   - assign
+  - blunderbuss
+  - cat
   - cla
+  - dog
+  - heart
+  - help
+  - hold
   - label
   - lgtm
   - lifecycle
+  - shrug
   - size
-  - wip
-  - hold
-  - help
-  - cat
-  - dog
-
-  kubernetes-incubator/service-catalog:
-  - approve
-  - blunderbuss
-  - cat
-  - dog
-  - help
-  - hold
-  - trigger
+  - skip
   - verify-owners
   - wip
+  - yuks
+
+  kubernetes-csi:
+  - approve
+  - assign
+  - blunderbuss
+  - cat
+  - cla
+  - dog
+  - heart
+  - help
+  - hold
+  - label
+  - lgtm
+  - lifecycle
+  - shrug
+  - size
+  - skip
+  - verify-owners
+  - wip
+  - yuks
+
+  kubernetes-csi/csi-lib-utils:
+  - trigger
+
+  kubernetes-incubator:
+  - approve
+  - assign
+  - blunderbuss
+  - cat
+  - cla
+  - dog
+  - heart
+  - help
+  - hold
+  - label
+  - lgtm
+  - lifecycle
+  - shrug
+  - size
+  - skip
+  - verify-owners
+  - wip
+  - yuks
+
+  kubernetes-incubator/service-catalog:
+  - trigger
+
+  kubernetes-incubator/ip-masq-agent:
+  - trigger
+
+  kubernetes-security/kubernetes:
+  - trigger
 
   kubernetes-sigs:
   - approve
@@ -470,8 +507,13 @@ plugins:
   - shrug
   - size
   - skip
+  - verify-owners
   - wip
   - yuks
+
+  kubernetes-sigs/kind:
+  - trigger
+  - welcome
 
   kubernetes-sigs/federation-v2:
   - trigger
@@ -488,16 +530,41 @@ plugins:
   kubernetes-sigs/cluster-api-provider-aws:
   - trigger
 
+  kubernetes-sigs/cluster-api-provider-digitalocean:
+  - trigger
+
   kubernetes-sigs/cluster-api-provider-gcp:
   - trigger
 
   kubernetes-sigs/cluster-api-provider-openstack:
   - trigger
 
+  kubernetes-sigs/cluster-api-provider-vsphere:
+  - trigger
+
+  kubernetes-sigs/contributor-playground:
+  - require-sig
+  - welcome
+
   kubernetes-sigs/gcp-compute-persistent-disk-csi-driver:
   - trigger
 
   kubernetes-sigs/gcp-filestore-csi-driver:
+  - trigger
+
+  kubernetes-sigs/cri-o:
+  - trigger
+
+  kubernetes-sigs/kube-storage-version-migrator:
+  - trigger
+
+  kubernetes-sigs/structured-merge-diff:
+  - trigger
+
+  kubernetes-sigs/aws-alb-ingress-controller:
+  - trigger
+
+  kubernetes-sigs/aws-ebs-csi-driver:
   - trigger
 
   containerd/cri:
@@ -507,9 +574,6 @@ plugins:
   - lgtm
   - lifecycle
   - size
-  - trigger
-
-  kubernetes-security/kubernetes:
   - trigger
 
   tensorflow/k8s:
@@ -529,19 +593,29 @@ plugins:
   GoogleCloudPlatform/k8s-multicluster-ingress:
   - trigger
 
-  client-go/unofficial-docs:
-  - assign
-  - approve
+  GoogleCloudPlatform/k8s-cluster-bundle:
+  - trigger
   - lgtm
+  - size
+  - welcome
+
+  client-go/unofficial-docs:
   - approve
-  - label
-  - cla
+  - assign
+  - blunderbuss
   - cat
+  - cla
   - dog
   - help
-  - blunderbuss
-  - wip
   - hold
+  - label
+  - lgtm
+  - verify-owners
+  - wip
+
+  cncf/apisnoop:
+  - cat # /meow replies with cat pictures
+  - dog # /bark replies with dog pictures
 
 external_plugins:
   kubernetes/community:
@@ -573,6 +647,14 @@ external_plugins:
     events:
       - pull_request
   kubernetes-incubator/service-catalog:
+  - name: needs-rebase
+    events:
+      - pull_request
+  kubernetes-sigs/contributor-playground:
+  - name: needs-rebase
+    events:
+      - pull_request
+  kubernetes-sigs/cluster-api-provider-digitalocean:
   - name: needs-rebase
     events:
       - pull_request

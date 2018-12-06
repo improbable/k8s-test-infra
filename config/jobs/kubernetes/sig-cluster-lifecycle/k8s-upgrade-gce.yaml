@@ -1,7 +1,6 @@
 periodics:
 # GCE upgrades
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable1-beta-upgrade-cluster
   labels:
     preset-service-account: "true"
@@ -21,13 +20,37 @@ periodics:
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
       - --provider=gce
-      - --test_args=--kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
+      - --test_args=--ginkgo.focus=\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/k8s-beta --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+- interval: 2h
+  name: ci-kubernetes-e2e-gce-stable1-beta-upgrade-cluster-parallel
+  labels:
+    preset-service-account: "true"
+    preset-k8s-ssh: "true"
+  spec:
+    containers:
+    - args:
+      - --timeout=920
+      - --bare
+      - --scenario=kubernetes_e2e
+      - --
+      - --check-leaked-resources
+      - --check-version-skew=false
+      - --env=STORAGE_MEDIA_TYPE=application/vnd.kubernetes.protobuf
+      - --extract=ci/k8s-beta
+      - --extract=ci/k8s-stable1
+      - --gcp-node-image=gci
+      - --gcp-zone=us-central1-f
+      - --ginkgo-parallel
+      - --provider=gce
+      - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
+      - --timeout=900m
+      - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/k8s-beta --upgrade-image=gci
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable1-beta-upgrade-cluster-new
   labels:
     preset-service-account: "true"
@@ -47,13 +70,39 @@ periodics:
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
       - --provider=gce
+      - --test_args=--ginkgo.focus=\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\]
       - --skew
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/k8s-beta --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+- interval: 2h
+  name: ci-kubernetes-e2e-gce-stable1-beta-upgrade-cluster-new-parallel
+  labels:
+    preset-service-account: "true"
+    preset-k8s-ssh: "true"
+  spec:
+    containers:
+    - args:
+      - --timeout=920
+      - --bare
+      - --scenario=kubernetes_e2e
+      - --
+      - --check-leaked-resources
+      - --check-version-skew=false
+      - --env=STORAGE_MEDIA_TYPE=application/vnd.kubernetes.protobuf
+      - --extract=ci/k8s-beta
+      - --extract=ci/k8s-stable1
+      - --gcp-node-image=gci
+      - --gcp-zone=us-central1-f
+      - --ginkgo-parallel
+      - --provider=gce
+      - --test_args=--ginkgo.skip=\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]
+      - --skew
+      - --timeout=900m
+      - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/k8s-beta --upgrade-image=gci
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable1-beta-upgrade-master
   labels:
     preset-service-account: "true"
@@ -73,13 +122,38 @@ periodics:
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
       - --provider=gce
-      - --test_args=--kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
+      - --test_args=--ginkgo.focus=\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:MasterUpgrade\] --upgrade-target=ci/k8s-beta
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+- interval: 2h
+  name: ci-kubernetes-e2e-gce-stable1-beta-upgrade-master-parallel
+  labels:
+    preset-service-account: "true"
+    preset-k8s-ssh: "true"
+  spec:
+    containers:
+    - args:
+      - --timeout=920
+      - --bare
+      - --scenario=kubernetes_e2e
+      - --
+      - --check-leaked-resources
+      - --check-version-skew=false
+      - --env=STORAGE_MEDIA_TYPE=application/vnd.kubernetes.protobuf
+      - --extract=ci/k8s-beta
+      - --extract=ci/k8s-stable1
+      - --gcp-node-image=gci
+      - --gcp-zone=us-central1-f
+      - --ginkgo-parallel
+      - --provider=gce
+      - --test_args=--ginkgo.skip=\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
+      - --timeout=900m
+      - --upgrade_args=--ginkgo.focus=\[Feature:MasterUpgrade\] --upgrade-target=ci/k8s-beta
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+
 
 - interval: 12h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable1-stable2-downgrade-cluster
   labels:
     preset-service-account: "true"
@@ -103,10 +177,9 @@ periodics:
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterDowngrade\] --upgrade-target=ci/k8s-stable2 --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 12h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable1-stable2-downgrade-cluster-parallel
   labels:
     preset-service-account: "true"
@@ -131,10 +204,9 @@ periodics:
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=120m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterDowngrade\] --upgrade-target=ci/k8s-stable2 --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 12h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable2-stable1-upgrade-cluster
   labels:
     preset-service-account: "true"
@@ -157,10 +229,9 @@ periodics:
       - --test_args=--kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/k8s-stable1 --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 12h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable2-stable1-upgrade-cluster-new
   labels:
     preset-service-account: "true"
@@ -183,10 +254,9 @@ periodics:
       - --skew
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/k8s-stable1 --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 12h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-stable2-stable1-upgrade-master
   labels:
     preset-service-account: "true"
@@ -209,39 +279,9 @@ periodics:
       - --test_args=--kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:MasterUpgrade\] --upgrade-target=ci/k8s-stable1
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
-  name: ci-kubernetes-e2e-gce-gci-latest-upgrade-etcd
-  labels:
-    preset-service-account: "true"
-    preset-k8s-ssh: "true"
-  spec:
-    containers:
-    - args:
-      - --timeout=110
-      - --bare
-      - --scenario=kubernetes_e2e
-      - --
-      - --check-leaked-resources
-      - --check-version-skew=false
-      - --env=STORAGE_BACKEND=etcd2
-      - --env=ETCD_VERSION=2.2.1
-      - --env=ETCD_IMAGE=2.2.1
-      - --env=STORAGE_MEDIA_TYPE=application/json
-      - --extract=ci/latest
-      - --extract=ci/latest
-      - --gcp-node-image=gci
-      - --gcp-zone=us-central1-f
-      - --provider=gce
-      - --test=false
-      - --timeout=60m
-      - --upgrade_args=--ginkgo.focus=\[Feature:EtcdUpgrade\] --etcd-upgrade-storage=etcd3 --etcd-upgrade-version=3.0.17
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
-
-- interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-master-new-downgrade-cluster
   labels:
     preset-service-account: "true"
@@ -271,10 +311,9 @@ periodics:
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterDowngrade\] --upgrade-target=ci/k8s-stable1
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-master-new-downgrade-cluster-parallel
   labels:
     preset-service-account: "true"
@@ -305,10 +344,9 @@ periodics:
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=120m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterDowngrade\] --upgrade-target=ci/k8s-stable1
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-beta-stable1-downgrade-cluster
   labels:
     preset-service-account: "true"
@@ -333,10 +371,9 @@ periodics:
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterDowngrade\] --upgrade-target=ci/k8s-stable1 --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-beta-stable1-downgrade-cluster-parallel
   labels:
     preset-service-account: "true"
@@ -362,10 +399,9 @@ periodics:
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=120m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterDowngrade\] --upgrade-target=ci/k8s-stable1 --upgrade-image=gci
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-new-master-upgrade-cluster
   labels:
     preset-service-account: "true"
@@ -395,10 +431,11 @@ periodics:
       - --test_args=--ginkgo.focus=\[Slow\]|\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/latest
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
+# ci-kubernetes-e2e-gce-new-master-upgrade-cluster-new has a -parallel form for the parallel-safe tests,
+# and the non-parallel form runs the Serial & Disruptive tests (only)
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-new-master-upgrade-cluster-new
   labels:
     preset-service-account: "true"
@@ -420,11 +457,38 @@ periodics:
       - --provider=gce
       - --skew
       - --timeout=900m
+      - --test_args=--ginkgo.focus=\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\]
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/latest
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
+  name: ci-kubernetes-e2e-gce-new-master-upgrade-cluster-new-parallel
+  labels:
+    preset-service-account: "true"
+    preset-k8s-ssh: "true"
+  spec:
+    containers:
+    - args:
+      - --timeout=920
+      - --bare
+      - --scenario=kubernetes_e2e
+      - --
+      - --check-leaked-resources
+      - --check-version-skew=false
+      - --env=STORAGE_MEDIA_TYPE=application/vnd.kubernetes.protobuf
+      - --extract=ci/latest
+      - --extract=ci/k8s-stable1
+      - --gcp-node-image=gci
+      - --gcp-zone=us-central1-f
+      - --ginkgo-parallel
+      - --provider=gce
+      - --skew
+      - --timeout=900m
+      - --test_args=--ginkgo.skip=\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]
+      - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/latest
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+
+- interval: 2h
   name: ci-kubernetes-e2e-gce-new-master-upgrade-cluster-parallel
   labels:
     preset-service-account: "true"
@@ -454,10 +518,9 @@ periodics:
       - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=120m
       - --upgrade_args=--ginkgo.focus=\[Feature:ClusterUpgrade\] --upgrade-target=ci/latest
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-gce-new-master-upgrade-master
   labels:
     preset-service-account: "true"
@@ -478,7 +541,34 @@ periodics:
       - --gcp-node-image=gci
       - --gcp-zone=us-central1-f
       - --provider=gce
-      - --test_args=--kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
+      - --test_args=--ginkgo.focus=\[Serial\]|\[Disruptive\] --ginkgo.skip=\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
       - --timeout=900m
       - --upgrade_args=--ginkgo.focus=\[Feature:MasterUpgrade\] --upgrade-target=ci/latest
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+
+- interval: 2h
+  name: ci-kubernetes-e2e-gce-new-master-upgrade-master-parallel
+  labels:
+    preset-service-account: "true"
+    preset-k8s-ssh: "true"
+  spec:
+    containers:
+    - args:
+      - --timeout=920
+      - --bare
+      - --scenario=kubernetes_e2e
+      - --
+      - --check-leaked-resources
+      - --check-version-skew=false
+      - --env=STORAGE_MEDIA_TYPE=application/vnd.kubernetes.protobuf
+      - --env=KUBE_ENABLE_CLUSTER_MONITORING=standalone
+      - --extract=ci/latest
+      - --extract=ci/k8s-stable1
+      - --gcp-node-image=gci
+      - --gcp-zone=us-central1-f
+      - --ginkgo-parallel
+      - --provider=gce
+      - --test_args=--ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\] --kubectl-path=../../../../kubernetes_skew/cluster/kubectl.sh --minStartupPods=8
+      - --timeout=900m
+      - --upgrade_args=--ginkgo.focus=\[Feature:MasterUpgrade\] --upgrade-target=ci/latest
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master

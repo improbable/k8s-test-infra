@@ -24,16 +24,18 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"regexp"
+
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/plugins"
 	"k8s.io/test-infra/prow/plugins/assign"
-	"regexp"
 )
 
 const (
-	pluginName = "blunderbuss"
+	// PluginName is the name for this plugin
+	PluginName = "blunderbuss"
 )
 
 var (
@@ -43,8 +45,8 @@ var (
 )
 
 func init() {
-	plugins.RegisterPullRequestHandler(pluginName, handlePullRequest, helpProvider)
-	plugins.RegisterReviewCommentEventHandler(pluginName, handleReviewComment, helpProvider)
+	plugins.RegisterPullRequestHandler(PluginName, handlePullRequest, helpProvider)
+	plugins.RegisterReviewCommentEventHandler(PluginName, handleReviewComment, helpProvider)
 }
 
 func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
@@ -117,7 +119,7 @@ type githubClient interface {
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
 }
 
-func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) error {
+func handlePullRequest(pc plugins.Agent, pre github.PullRequestEvent) error {
 	if !shouldAssignReviewers(pre.Action == github.PullRequestActionOpened, pre.PullRequest.Title, pre.PullRequest.Body) {
 		return nil
 	}
@@ -139,7 +141,7 @@ func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) err
 	)
 }
 
-func handleReviewComment(pc plugins.PluginClient, rce github.ReviewCommentEvent) error {
+func handleReviewComment(pc plugins.Agent, rce github.ReviewCommentEvent) error {
 	if !shouldAssignReviewers(false, "", rce.Comment.Body) {
 		return nil
 	}
