@@ -2,22 +2,28 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "go_default_library",
-    srcs = ["repoowners.go"],
+    srcs = [
+        "endpoint.go",
+        "repoowners.go",
+    ],
     importpath = "k8s.io/test-infra/prow/repoowners",
     visibility = ["//visibility:public"],
     deps = [
         "//prow/config:go_default_library",
         "//prow/git:go_default_library",
         "//prow/github:go_default_library",
-        "//vendor/github.com/ghodss/yaml:go_default_library",
         "//vendor/github.com/sirupsen/logrus:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/util/sets:go_default_library",
+        "//vendor/sigs.k8s.io/yaml:go_default_library",
     ],
 )
 
 go_test(
     name = "go_default_test",
-    srcs = ["repoowners_test.go"],
+    srcs = [
+        "endpoint_test.go",
+        "repoowners_test.go",
+    ],
     embed = [":go_default_library"],
     deps = [
         "//prow/config:go_default_library",

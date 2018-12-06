@@ -28,11 +28,12 @@ import (
 )
 
 const (
-	pluginName = "owners-label"
+	// PluginName is the name of this plugin
+	PluginName = "owners-label"
 )
 
 func init() {
-	plugins.RegisterPullRequestHandler(pluginName, handlePullRequest, helpProvider)
+	plugins.RegisterPullRequestHandler(PluginName, handlePullRequest, helpProvider)
 }
 
 func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
@@ -49,10 +50,11 @@ type ownersClient interface {
 type githubClient interface {
 	AddLabel(org, repo string, number int, label string) error
 	GetIssueLabels(org, repo string, number int) ([]github.Label, error)
+	GetRepoLabels(owner, repo string) ([]github.Label, error)
 	GetPullRequestChanges(org, repo string, number int) ([]github.PullRequestChange, error)
 }
 
-func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) error {
+func handlePullRequest(pc plugins.Agent, pre github.PullRequestEvent) error {
 	if pre.Action != github.PullRequestActionOpened && pre.Action != github.PullRequestActionReopened && pre.Action != github.PullRequestActionSynchronize {
 		return nil
 	}
@@ -66,17 +68,29 @@ func handlePullRequest(pc plugins.PluginClient, pre github.PullRequestEvent) err
 }
 
 func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, pre *github.PullRequestEvent) error {
-	changes, err := ghc.GetPullRequestChanges(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number)
+	org := pre.Repo.Owner.Login
+	repo := pre.Repo.Name
+	number := pre.Number
+
+	repoLabels, err := ghc.GetRepoLabels(org, repo)
+	if err != nil {
+		return err
+	}
+	issuelabels, err := ghc.GetIssueLabels(org, repo, number)
+	if err != nil {
+		return err
+	}
+
+	RepoLabelsExisting := sets.NewString()
+	for _, label := range repoLabels {
+		RepoLabelsExisting.Insert(label.Name)
+	}
+	changes, err := ghc.GetPullRequestChanges(org, repo, number)
 	if err != nil {
 		return fmt.Errorf("error getting PR changes: %v", err)
 	}
-	labels, err := ghc.GetIssueLabels(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number)
-	if err != nil {
-		return fmt.Errorf("error getting PR labels: %v", err)
-	}
-
 	currentLabels := sets.NewString()
-	for _, label := range labels {
+	for _, label := range issuelabels {
 		currentLabels.Insert(label.Name)
 	}
 	neededLabels := sets.NewString()
@@ -84,10 +98,20 @@ func handle(ghc githubClient, oc ownersClient, log *logrus.Entry, pre *github.Pu
 		neededLabels.Insert(oc.FindLabelsForFile(change.Filename).List()...)
 	}
 
-	for _, toAdd := range neededLabels.Difference(currentLabels).List() {
-		if err := ghc.AddLabel(pre.Repo.Owner.Login, pre.Repo.Name, pre.Number, toAdd); err != nil {
-			log.WithError(err).Errorf("Adding %q label.", toAdd)
+	nonexistent := sets.NewString()
+
+	for _, labelToAdd := range neededLabels.Difference(currentLabels).List() {
+		if !RepoLabelsExisting.Has(labelToAdd) {
+			nonexistent.Insert(labelToAdd)
+			continue
 		}
+		if err := ghc.AddLabel(org, repo, number, labelToAdd); err != nil {
+			log.WithError(err).Errorf("Github failed to add the following label: %s", labelToAdd)
+		}
+	}
+
+	if nonexistent.Len() > 0 {
+		log.Warnf("Unable to add nonexistent labels: %q", nonexistent.List())
 	}
 	return nil
 }

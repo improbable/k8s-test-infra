@@ -1,12 +1,11 @@
 periodics:
 - name: ci-cluster-api-provider-gcp-build
   interval: 1h
-  agent: kubernetes
   labels:
     preset-service-account: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/gcloud-in-go:v20171113-192bec25
+    - image: gcr.io/k8s-testimages/gcloud-in-go:v20180927-6b4facbe6
       args:
       - "--repo=sigs.k8s.io/cluster-api-provider-gcp"
       - "--root=/go/src"
@@ -16,7 +15,6 @@ periodics:
       - "./scripts/ci-build.sh"
 - name: ci-cluster-api-provider-gcp-test
   interval: 1h
-  agent: kubernetes
   labels:
     preset-service-account: "true"
   spec:

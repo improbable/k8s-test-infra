@@ -1,16 +1,12 @@
 presubmits:
   kubernetes-sigs/cluster-api-provider-gcp:
   - name: pull-cluster-api-provider-gcp-build
-    agent: kubernetes
     always_run: true
-    context: pull-cluster-api-provider-gcp-build
-    rerun_command: "/test pull-cluster-api-provider-gcp-build"
-    trigger: "/test( all| pull-cluster-api-provider-gcp-build)"
     labels:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/gcloud-in-go:v20171113-192bec25
+      - image: gcr.io/k8s-testimages/gcloud-in-go:v20180927-6b4facbe6
         args:
         - "--repo=sigs.k8s.io/$(REPO_NAME)=$(PULL_REFS)"
         - "--root=/go/src"
@@ -19,11 +15,7 @@ presubmits:
         - "--"
         - "./scripts/ci-build.sh"
   - name: pull-cluster-api-provider-gcp-make
-    agent: kubernetes
     always_run: true
-    context: pull-cluster-api-provider-gcp-make
-    rerun_command: "/test pull-cluster-api-provider-gcp-make"
-    trigger: "/test( all| pull-cluster-api-provider-gcp-make)"
     labels:
       preset-service-account: "true"
       preset-dind-enabled: "true"
@@ -40,21 +32,17 @@ presubmits:
         # docker-in-docker needs privileged mode
         securityContext:
           privileged: true
-        image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-1.10
+        image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-1.10
         resources:
           requests:
             memory: "6Gi"
   - name: pull-cluster-api-provider-gcp-test
-    agent: kubernetes
     always_run: true
-    context: pull-cluster-api-provider-gcp-test
-    rerun_command: "/test pull-cluster-api-provider-gcp-test"
-    trigger: "/test( all| pull-cluster-api-provider-gcp-test)"
     labels:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/cluster-api:v20180720-d52d72975
+      - image: gcr.io/k8s-testimages/cluster-api:v20180927-f09bc3b1b
         args:
         - "--repo=sigs.k8s.io/$(REPO_NAME)=$(PULL_REFS)"
         - "--root=/go/src"

@@ -1,34 +1,43 @@
+presets:
+- labels:
+    preset-e2e-platform-aws: "true"
+  env:
+  # TODO(zmerlynn): Eliminate the other uses of this env variable
+  - name: KUBE_SSH_USER
+    value: admin
+  # Log dump for kops (relies on kops-e2e-runner.sh support)
+  - name: LOG_DUMP_SSH_KEY
+    value: /workspace/.ssh/kube_aws_rsa
+  - name: LOG_DUMP_SSH_USER
+    value: admin
+  - name: LOG_DUMP_SAVE_LOGS
+    value: cloud-init-output
+  - name: LOG_DUMP_SAVE_SERVICES
+    value: protokube
+  # kops testing only ever uses Cloud SDK for status and uploads
+  - name: CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK
+    value: "true"
+  - name: CLOUDSDK_EXPERIMENTAL_FAST_COMPONENT_UPDATE
+    value: "false"
+    # Ignore version-we-pass vs version-kops-expects
+  - name: KOPS_RUN_OBSOLETE_VERSION
+    value: "true"
+    # Except for the updown job itself, use a version of kops that's
+    # passed updown.
+  - name: KOPS_LATEST
+    value: latest-ci-updown-green.txt
+  - name: KOPS_DEPLOY_LATEST_KUBE
+    value: "y"
+
+
 periodics:
 - interval: 30m
-  name: ci-kops-build
-  agent: kubernetes
-  labels:
-    preset-service-account: "true"
-    preset-dind-enabled: "true"
-  spec:
-    containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
-      args:
-      - --repo=k8s.io/kops
-      - --repo=k8s.io/release
-      - --root=/go/src
-      - --timeout=30
-      - --scenario=execute
-      - --
-      - make
-      - gcs-publish-ci
-      - GCS_LOCATION=gs://kops-ci/bin
-      # docker-in-docker needs privileged mode
-      securityContext:
-        privileged: true
-
-- interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws
   labels:
     preset-service-account: "true"
     preset-aws-ssh: "true"
     preset-aws-credential: "true"
+    preset-e2e-platform-aws: "true"
   spec:
     containers:
     - args:
@@ -38,22 +47,21 @@ periodics:
       - --
       - --aws
       - --cluster=e2e-kops-aws.test-cncf-aws.k8s.io
-      - --env-file=jobs/platform/kops_aws.env
-      - --env-file=jobs/env/ci-kubernetes-e2e-kops-aws.env
+      - --env=KOPS_PUBLISH_GREEN_PATH=gs://kops-ci/bin/latest-ci-green.txt
       - --extract=ci/latest
       - --ginkgo-parallel
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-beta
   labels:
     preset-service-account: "true"
     preset-aws-ssh: "true"
     preset-aws-credential: "true"
+    preset-e2e-platform-aws: "true"
   spec:
     containers:
     - args:
@@ -64,16 +72,14 @@ periodics:
       - --aws
       - --cluster=e2e-kops-aws-beta.test-cncf-aws.k8s.io
       - --env=KOPS_DEPLOY_LATEST_URL=https://storage.googleapis.com/kubernetes-release-dev/ci/k8s-beta.txt
-      - --env-file=jobs/platform/kops_aws.env
       - --extract=ci/k8s-beta
       - --ginkgo-parallel
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-channelalpha
   labels:
     preset-service-account: "true"
@@ -100,7 +106,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-ena-nvme
   labels:
     preset-service-account: "true"
@@ -118,7 +123,7 @@ periodics:
       - --env=KUBE_SSH_USER=admin
       - --extract=ci/latest
       - --ginkgo-parallel
-      - --kops-args=--node-size=m5.large --master-size=m5.large --channel=alpha
+      - --kops-args=--node-size=m5.large --master-size=m5.large --channel=alpha --image kope.io/k8s-1.11-debian-stretch-amd64-hvm-ebs-2018-08-17
       - --kops-version=https://storage.googleapis.com/kops-ci/bin/latest-ci-updown-green.txt
       - --kops-zones=us-west-2a
       - --provider=aws
@@ -128,7 +133,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-ha-uswest2
   labels:
     preset-service-account: "true"
@@ -156,7 +160,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 4h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-imagecentos7
   labels:
     preset-service-account: "true"
@@ -185,7 +188,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 4h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-imageubuntu1604
   labels:
     preset-service-account: "true"
@@ -213,7 +215,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-networking-kopeio-vxlan
   labels:
     preset-service-account: "true"
@@ -240,7 +241,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-newrunner
   labels:
     preset-service-account: "true"
@@ -266,7 +266,6 @@ periodics:
       imagePullPolicy: Always
 
 - interval: 2h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-stable1
   labels:
     preset-service-account: "true"
@@ -288,10 +287,9 @@ periodics:
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 4h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-stable2
   labels:
     preset-service-account: "true"
@@ -313,10 +311,9 @@ periodics:
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 6h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-stable3
   labels:
     preset-service-account: "true"
@@ -338,10 +335,9 @@ periodics:
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-updown
   labels:
     preset-service-account: "true"
@@ -364,10 +360,9 @@ periodics:
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.focus=\[k8s.io\]\sNetworking.*\[Conformance\]
       - --timeout=30m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 24h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-aws-weave
   labels:
     preset-service-account: "true"
@@ -390,10 +385,9 @@ periodics:
       - --provider=aws
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-gce
   labels:
     preset-service-account: "true"
@@ -415,10 +409,9 @@ periodics:
       - --provider=gce
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 1h
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-gce-channelalpha
   labels:
     preset-service-account: "true"
@@ -440,10 +433,9 @@ periodics:
       - --provider=gce
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
 
 - interval: 30m
-  agent: kubernetes
   name: ci-kubernetes-e2e-kops-gce-ha
   labels:
     preset-service-account: "true"
@@ -465,4 +457,4 @@ periodics:
       - --provider=gce
       - --test_args=--ginkgo.flakeAttempts=2 --ginkgo.skip=\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[HPA\]|Dashboard|Services.*functioning.*NodePort
       - --timeout=120m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20180730-8b7ab3104-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
