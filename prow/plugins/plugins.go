@@ -222,6 +222,7 @@ type Configuration struct {
 	Triggers             []Trigger              `json:"triggers,omitempty"`
 	Welcome              []Welcome              `json:"welcome,omitempty"`
 	JiraLinker           JiraLinker             `json:"jira_linker,omitempty"`
+	ImpCLA               ImpCLA                 `json:"imp_cla,omitempty"`
 }
 
 // Golint holds configuration for the golint plugin
@@ -536,6 +537,14 @@ type Welcome struct {
 // JiraLinker is the config for the jira-linker plugin
 type JiraLinker struct {
 	JiraBaseUrl string `json:"jira_base_url"`
+}
+
+// ImpCLA is the config for the imp-cla plugin
+type ImpCLA struct {
+	// ServiceAccountFile is the file containing the secret for the GRPC connection
+	ServiceAccountFile string `json:"service_account_file"`
+	// SpatialAPIhost is the host:port combination for the thor endpoint
+	SpatialAPIHost string `json:"spatial_api_host,omitempty"`
 }
 
 // CherryPickUnapproved is the config for the cherrypick-unapproved plugin.
