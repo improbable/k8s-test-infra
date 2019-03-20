@@ -23,11 +23,11 @@ import (
 	"os"
 	"strings"
 
-	"k8s.io/test-infra/prow/config"
+	"github.com/sirupsen/logrus"
+
+	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/flagutil"
 	"k8s.io/test-infra/prow/github"
-
-	"github.com/sirupsen/logrus"
 )
 
 type options struct {
@@ -68,8 +68,8 @@ func optionsFromFlags() options {
 	var o options
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	o.github.AddFlags(fs)
-	fs.StringVar(&o.repo, "repo", "", "Github repo")
-	fs.StringVar(&o.org, "org", "", "Github org")
+	fs.StringVar(&o.repo, "repo", "", "GitHub repo")
+	fs.StringVar(&o.org, "org", "", "GitHub org")
 	fs.StringVar(&o.branch, "branch", "", "Repo branch to merge into")
 	fs.StringVar(&o.source, "source", "", "The user:branch to merge from")
 
@@ -88,12 +88,12 @@ func main() {
 		logrus.WithError(err).Fatal("bad flags")
 	}
 
-	var jamesBond config.SecretAgent
+	jamesBond := &secret.Agent{}
 	if err := jamesBond.Start([]string{o.github.TokenPath}); err != nil {
 		logrus.WithError(err).Fatal("Failed to start secrets agent")
 	}
 
-	gc, err := o.github.GitHubClient(&jamesBond, !o.confirm)
+	gc, err := o.github.GitHubClient(jamesBond, !o.confirm)
 	if err != nil {
 		logrus.WithError(err).Fatal("Failed to create github client")
 	}

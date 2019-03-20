@@ -19,6 +19,7 @@ package main
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 
 	"k8s.io/test-infra/kubetest/util"
 )
@@ -42,7 +43,11 @@ func (b *buildStrategy) String() string {
 // Set to --build=B or buildDefault if just --build
 func (b *buildStrategy) Set(value string) error {
 	if value == "true" { // just --build, choose default
-		value = buildDefault
+		if runtime.GOARCH == "amd64" {
+			value = buildDefault
+		} else {
+			value = "host-go"
+		}
 	}
 	switch value {
 	case "bazel", "e2e", "host-go", "quick", "release":
@@ -88,38 +93,4 @@ func (b *buildStrategy) Build() error {
 	// The build-release script needs stdin to ask the user whether
 	// it's OK to download the docker image.
 	return control.FinishRunning(exec.Command("make", "-C", util.K8s("kubernetes"), target))
-}
-
-type buildFederationStrategy struct {
-	buildStrategy
-}
-
-type buildIngressGCEStrategy struct {
-	buildStrategy
-}
-
-func (b *buildFederationStrategy) Type() string {
-	return "buildFederationStrategy"
-}
-
-func (b *buildIngressGCEStrategy) Type() string {
-	return "buildIngressGCEStrategy"
-}
-
-// Build federation according to specified strategy.
-// This may be a bazel, quick or full release build depending on --build=B.
-func (b *buildFederationStrategy) Build() error {
-	var target string
-	switch b.String() {
-	case "bazel":
-		target = "bazel-release"
-	case "quick":
-		target = "quick-release"
-	case "release":
-		target = "release"
-	default:
-		return fmt.Errorf("unknown federation build strategy: %v", b)
-	}
-
-	return control.FinishRunning(exec.Command("make", "-C", util.K8s("federation"), target))
 }

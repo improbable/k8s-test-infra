@@ -32,18 +32,26 @@ import (
 	"k8s.io/test-infra/prow/repoowners"
 )
 
-// PluginName is the registered plugin name
-const PluginName = labels.LGTM
+const (
+	// PluginName defines this plugin's registered name.
+	PluginName = labels.LGTM
+)
 
 var (
 	addLGTMLabelNotification   = "LGTM label has been added.  <details>Git tree hash: %s</details>"
 	addLGTMLabelNotificationRe = regexp.MustCompile(fmt.Sprintf(addLGTMLabelNotification, "(.*)"))
+	configInfoReviewActsAsLgtm = `Reviews of "approve" or "request changes" act as adding or removing LGTM.`
+	configInfoStoreTreeHash    = `Squashing commits does not remove LGTM.`
 	// LGTMLabel is the name of the lgtm label applied by the lgtm plugin
 	LGTMLabel           = labels.LGTM
 	lgtmRe              = regexp.MustCompile(`(?mi)^/lgtm(?: no-issue)?\s*$`)
 	lgtmCancelRe        = regexp.MustCompile(`(?mi)^/lgtm cancel\s*$`)
 	removeLGTMLabelNoti = "New changes are detected. LGTM label has been removed."
 )
+
+func configInfoStickyLgtmTeam(team string) string {
+	return fmt.Sprintf(`Commits from "%s" do not remove LGTM.`, team)
+}
 
 type commentPruner interface {
 	PruneComments(shouldPrune func(github.IssueComment) bool)
@@ -58,12 +66,44 @@ func init() {
 }
 
 func helpProvider(config *plugins.Configuration, enabledRepos []string) (*pluginhelp.PluginHelp, error) {
-	// The Config field is omitted because this plugin is not configurable.
+	configInfo := map[string]string{}
+	for _, orgRepo := range enabledRepos {
+		parts := strings.Split(orgRepo, "/")
+		var opts *plugins.Lgtm
+		switch len(parts) {
+		case 1:
+			opts = optionsForRepo(config, orgRepo, "")
+		case 2:
+			opts = optionsForRepo(config, parts[0], parts[1])
+		default:
+			return nil, fmt.Errorf("invalid repo in enabledRepos: %q", orgRepo)
+		}
+		var isConfigured bool
+		var configInfoStrings []string
+		configInfoStrings = append(configInfoStrings, "The plugin has the following configuration:<ul>")
+		if opts.ReviewActsAsLgtm {
+			configInfoStrings = append(configInfoStrings, "<li>"+configInfoReviewActsAsLgtm+"</li>")
+			isConfigured = true
+		}
+		if opts.StoreTreeHash {
+			configInfoStrings = append(configInfoStrings, "<li>"+configInfoStoreTreeHash+"</li>")
+			isConfigured = true
+		}
+		if opts.StickyLgtmTeam != "" {
+			configInfoStrings = append(configInfoStrings, "<li>"+configInfoStickyLgtmTeam(opts.StickyLgtmTeam)+"</li>")
+			isConfigured = true
+		}
+		configInfoStrings = append(configInfoStrings, fmt.Sprintf("</ul>"))
+		if isConfigured {
+			configInfo[orgRepo] = strings.Join(configInfoStrings, "\n")
+		}
+	}
 	pluginHelp := &pluginhelp.PluginHelp{
 		Description: "The lgtm plugin manages the application and removal of the 'lgtm' (Looks Good To Me) label which is typically used to gate merging.",
+		Config:      configInfo,
 	}
 	pluginHelp.AddCommand(pluginhelp.Command{
-		Usage:       "/lgtm [cancel] or Github Review action",
+		Usage:       "/lgtm [cancel] or GitHub Review action",
 		Description: "Adds or removes the 'lgtm' label which is typically used to gate merging.",
 		Featured:    true,
 		WhoCanUse:   "Collaborators on the repository. '/lgtm cancel' can be used additionally by the PR author.",
@@ -378,66 +418,63 @@ func handlePullRequest(log *logrus.Entry, gc githubClient, config *plugins.Confi
 
 	opts := optionsForRepo(config, org, repo)
 	if stickyLgtm(log, gc, config, opts, pe.PullRequest.User.Login, org, repo) {
-		// If the author is trusted,, skip tree hash verification and LGTM removal.
+		// If the author is trusted, skip tree hash verification and LGTM removal.
 		return nil
 	}
-	if opts.StoreTreeHash {
-		// Check if we have LGTM label
-		labels, err := gc.GetIssueLabels(org, repo, number)
-		if err != nil {
-			log.WithError(err).Error("Failed to get labels.")
-		}
 
-		if github.HasLabel(LGTMLabel, labels) {
-			// Check if we have a tree-hash comment
-			var lastLgtmTreeHash string
-			botname, err := gc.BotName()
+	// If we don't have the lgtm label, we don't need to check anything
+	labels, err := gc.GetIssueLabels(org, repo, number)
+	if err != nil {
+		log.WithError(err).Error("Failed to get labels.")
+	}
+	if !github.HasLabel(LGTMLabel, labels) {
+		return nil
+	}
+
+	if opts.StoreTreeHash {
+		// Check if we have a tree-hash comment
+		var lastLgtmTreeHash string
+		botname, err := gc.BotName()
+		if err != nil {
+			return err
+		}
+		comments, err := gc.ListIssueComments(org, repo, number)
+		if err != nil {
+			log.WithError(err).Error("Failed to get issue comments.")
+		}
+		// older comments are still present
+		// iterate backwards to find the last LGTM tree-hash
+		for i := len(comments) - 1; i >= 0; i-- {
+			comment := comments[i]
+			m := addLGTMLabelNotificationRe.FindStringSubmatch(comment.Body)
+			if comment.User.Login == botname && m != nil && comment.UpdatedAt.Equal(comment.CreatedAt) {
+				lastLgtmTreeHash = m[1]
+				break
+			}
+		}
+		if lastLgtmTreeHash != "" {
+			// Get the current tree-hash
+			commit, err := gc.GetSingleCommit(org, repo, pe.PullRequest.Head.SHA)
 			if err != nil {
-				return err
+				log.WithField("sha", pe.PullRequest.Head.SHA).WithError(err).Error("Failed to get commit.")
 			}
-			comments, err := gc.ListIssueComments(org, repo, number)
-			if err != nil {
-				log.WithError(err).Error("Failed to get issue comments.")
-			}
-			for _, comment := range comments {
-				m := addLGTMLabelNotificationRe.FindStringSubmatch(comment.Body)
-				if comment.User.Login == botname && m != nil && comment.UpdatedAt.Equal(comment.CreatedAt) {
-					lastLgtmTreeHash = m[1]
-					break
-				}
-			}
-			if lastLgtmTreeHash != "" {
-				// Get the current tree-hash
-				commit, err := gc.GetSingleCommit(org, repo, pe.PullRequest.Head.SHA)
-				if err != nil {
-					log.WithField("sha", pe.PullRequest.Head.SHA).WithError(err).Error("Failed to get commit.")
-				}
-				treeHash := commit.Commit.Tree.SHA
-				if treeHash == lastLgtmTreeHash {
-					// Don't remove the label, PR code hasn't changed
-					log.Infof("Keeping LGTM label as the tree-hash remained the same: %s", treeHash)
-					return nil
-				}
+			treeHash := commit.Commit.Tree.SHA
+			if treeHash == lastLgtmTreeHash {
+				// Don't remove the label, PR code hasn't changed
+				log.Infof("Keeping LGTM label as the tree-hash remained the same: %s", treeHash)
+				return nil
 			}
 		}
 	}
 
-	var labelNotFound bool
 	if err := gc.RemoveLabel(org, repo, number, LGTMLabel); err != nil {
-		if _, labelNotFound = err.(*github.LabelNotFound); !labelNotFound {
-			return fmt.Errorf("failed removing lgtm label: %v", err)
-		}
-		// If the error is indeed *github.LabelNotFound, consider it a success.
+		return fmt.Errorf("failed removing lgtm label: %v", err)
 	}
 
 	// Create a comment to inform participants that LGTM label is removed due to new
 	// pull request changes.
-	if !labelNotFound {
-		log.Infof("Commenting with an LGTM removed notification to %s/%s#%d with a message: %s", org, repo, number, removeLGTMLabelNoti)
-		return gc.CreateComment(org, repo, number, removeLGTMLabelNoti)
-	}
-
-	return nil
+	log.Infof("Commenting with an LGTM removed notification to %s/%s#%d with a message: %s", org, repo, number, removeLGTMLabelNoti)
+	return gc.CreateComment(org, repo, number, removeLGTMLabelNoti)
 }
 
 func skipCollaborators(config *plugins.Configuration, org, repo string) bool {
@@ -450,7 +487,7 @@ func skipCollaborators(config *plugins.Configuration, org, repo string) bool {
 	return false
 }
 
-func loadRepoOwners(gc githubClient, ownersClient repoowners.Interface, org, repo string, number int) (repoowners.RepoOwnerInterface, error) {
+func loadRepoOwners(gc githubClient, ownersClient repoowners.Interface, org, repo string, number int) (repoowners.RepoOwner, error) {
 	pr, err := gc.GetPullRequest(org, repo, number)
 	if err != nil {
 		return nil, err
@@ -473,7 +510,7 @@ func getChangedFiles(gc githubClient, org, repo string, number int) ([]string, e
 
 // loadReviewers returns all reviewers and approvers from all OWNERS files that
 // cover the provided filenames.
-func loadReviewers(ro repoowners.RepoOwnerInterface, filenames []string) sets.String {
+func loadReviewers(ro repoowners.RepoOwner, filenames []string) sets.String {
 	reviewers := sets.String{}
 	for _, filename := range filenames {
 		reviewers = reviewers.Union(ro.Approvers(filename)).Union(ro.Reviewers(filename))

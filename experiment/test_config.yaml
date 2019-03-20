@@ -1057,7 +1057,7 @@ jobs:
     args:
     - --env=KUBE_PROXY_DAEMONSET=true
     - --env=ENABLE_POD_PRIORITY=true
-    - --env=KUBE_FEATURE_GATES=AllAlpha=true
+    - --env=KUBE_FEATURE_GATES=AllAlpha=true,CSIMigration=false
     - --test_args=--ginkgo.focus=\[Feature:(Audit|BlockVolume|PodPreset|ExpandPersistentVolumes)\]|Networking --ginkgo.skip=Networking-Performance|IPv6|Feature:Volumes --minStartupPods=8
     sigOwners: ['sig-gcp']
 
@@ -1206,7 +1206,7 @@ cloudProviders:
 images:
   cos1:
     args:
-    - --image-family=cos-lts-1
+    - --image-family=cos-shielded-lts-1
     - --image-project=gke-node-images-test
     - --gcp-node-image=custom
   cos2:
@@ -1267,7 +1267,7 @@ testSuites:
     args:
     - --gcp-project-type=ingress-project
     - --timeout=150m
-    - --test_args=--ginkgo.focus=\[Feature:Ingress\] --minStartupPods=8
+    - --test_args=--ginkgo.focus=\[Feature:Ingress\] --ginkgo.skip=\[Unreleased\] --minStartupPods=8
   reboot:
     args:
     - --timeout=180m
@@ -1319,12 +1319,12 @@ nodeCommon:
     - --deployment=node
     - --node-tests=true
     - --provider=gce
-    - --gcp-zone=us-central1-f
+    - --gcp-zone=us-west1-b
 
 nodeImages:
   cos1:
     args:
-    - --image-family=cos-lts-1
+    - --image-family=cos-shielded-lts-1
     - --image-project=gke-node-images-test
     - --node-args=--instance-metadata=user-data<test/e2e_node/jenkins/gci-init.yaml,gci-update-strategy=update_disabled
   cos2:
@@ -1346,23 +1346,23 @@ nodeK8sVersions:
   dev:
     args:
     - --repo=k8s.io/kubernetes=master
-    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
   beta:
     args:
-    - --repo=k8s.io/kubernetes=release-1.13
-    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-1.13
+    - --repo=k8s.io/kubernetes=release-1.14
+    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-1.14
   stable1:
     args:
-    - --repo=k8s.io/kubernetes=release-1.12
-    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-1.12
+    - --repo=k8s.io/kubernetes=release-1.13
+    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-1.13
   stable2:
     args:
-    - --repo=k8s.io/kubernetes=release-1.11
-    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-1.11
+    - --repo=k8s.io/kubernetes=release-1.12
+    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-1.12
   stable3:
     args:
-    - --repo=k8s.io/kubernetes=release-1.10
-    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-1.10
+    - --repo=k8s.io/kubernetes=release-1.11
+    prowImage: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-1.11
 
 nodeTestSuites:
   default:

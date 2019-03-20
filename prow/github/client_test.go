@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/test-infra/ghproxy/ghcache"
 )
 
 type testTime struct {
@@ -341,6 +342,23 @@ func TestGetRef(t *testing.T) {
 	}
 }
 
+func TestDeleteRef(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path != "/repos/k8s/kuber/git/refs/heads/my-feature" {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+		http.Error(w, "204 No Content", http.StatusNoContent)
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	if err := c.DeleteRef("k8s", "kuber", "heads/my-feature"); err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	}
+}
+
 func TestGetSingleCommit(t *testing.T) {
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -493,9 +511,6 @@ func TestRemoveLabelFailsOnOtherThan404(t *testing.T) {
 	if err == nil {
 		t.Errorf("Expected error but got none")
 	}
-	if _, ok := err.(*LabelNotFound); ok {
-		t.Fatalf("Expected error not to be a 404: %v", err)
-	}
 }
 
 func TestRemoveLabelNotFound(t *testing.T) {
@@ -506,12 +521,8 @@ func TestRemoveLabelNotFound(t *testing.T) {
 	c := getClient(ts.URL)
 	err := c.RemoveLabel("any", "old", 3, "label")
 
-	if err == nil {
-		t.Fatalf("RemoveLabel expected an error, got none")
-	}
-
-	if _, ok := err.(*LabelNotFound); !ok {
-		t.Fatalf("RemoveLabel expected LabelNotFound error, got %v", err)
+	if err != nil {
+		t.Fatalf("RemoveLabel expected no error, got one: %v", err)
 	}
 }
 
@@ -1383,14 +1394,24 @@ func TestListIssueEvents(t *testing.T) {
 }
 
 func TestThrottle(t *testing.T) {
-	ts := simpleTestServer(
-		t,
-		"/repos/org/repo/issues/1/events",
-		[]ListedIssueEvent{
-			{Event: IssueActionOpened},
-			{Event: IssueActionClosed},
-		},
-	)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/org/repo/issues/1/events" {
+			b, err := json.Marshal([]ListedIssueEvent{{Event: IssueActionClosed}})
+			if err != nil {
+				t.Fatalf("Didn't expect error: %v", err)
+			}
+			fmt.Fprint(w, string(b))
+		} else if r.URL.Path == "/repos/org/repo/issues/2/events" {
+			w.Header().Set(ghcache.CacheModeHeader, string(ghcache.ModeRevalidated))
+			b, err := json.Marshal([]ListedIssueEvent{{Event: IssueActionOpened}})
+			if err != nil {
+				t.Fatalf("Didn't expect error: %v", err)
+			}
+			fmt.Fprint(w, string(b))
+		} else {
+			t.Fatalf("Bad request path: %s", r.URL.Path)
+		}
+	}))
 	c := getClient(ts.URL)
 	c.Throttle(1, 2)
 	if c.client != &c.throttle {
@@ -1402,16 +1423,26 @@ func TestThrottle(t *testing.T) {
 	if cap(c.throttle.throttle) != 2 {
 		t.Fatalf("Expected throttle channel capacity of two, found %d", cap(c.throttle.throttle))
 	}
+	check := func(events []ListedIssueEvent, err error, expectedAction IssueEventAction) {
+		if err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
+		if len(events) != 1 || events[0].Event != expectedAction {
+			t.Errorf("Expected one %q event, found: %v", string(expectedAction), events)
+		}
+		if len(c.throttle.throttle) != 1 {
+			t.Errorf("Expected one item in throttle channel, found %d", len(c.throttle.throttle))
+		}
+	}
 	events, err := c.ListIssueEvents("org", "repo", 1)
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
-	}
-	if len(events) != 2 {
-		t.Errorf("Expected two events, found %d: %v", len(events), events)
-	}
-	if len(c.throttle.throttle) != 1 {
-		t.Errorf("Expected one item in throttle channel, found %d", len(c.throttle.throttle))
-	}
+	check(events, err, IssueActionClosed)
+	// The following 2 calls should be refunded.
+	events, err = c.ListIssueEvents("org", "repo", 2)
+	check(events, err, IssueActionOpened)
+	events, err = c.ListIssueEvents("org", "repo", 2)
+	check(events, err, IssueActionOpened)
+
+	// Check that calls are delayed while throttled.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	go func() {
 		if _, err := c.ListIssueEvents("org", "repo", 1); err != nil {
@@ -1645,5 +1676,66 @@ func TestListMilestones(t *testing.T) {
 	c := getClient(ts.URL)
 	if err, _ := c.ListMilestones("k8s", "kuber"); err != nil {
 		t.Errorf("Didn't expect error: %v", err)
+	}
+}
+
+func TestListPRCommits(t *testing.T) {
+	ts := simpleTestServer(t, "/repos/theorg/therepo/pulls/3/commits",
+		[]RepositoryCommit{
+			{SHA: "sha"},
+			{SHA: "sha2"},
+		})
+	defer ts.Close()
+	c := getClient(ts.URL)
+	if commits, err := c.ListPRCommits("theorg", "therepo", 3); err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	} else {
+		if len(commits) != 2 {
+			t.Errorf("Expected 2 commits to be returned, but got %d", len(commits))
+		}
+	}
+}
+
+func TestCombinedStatus(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("Bad method: %s", r.Method)
+		}
+		if r.URL.Path == "/repos/k8s/kuber/commits/SHA/status" {
+			statuses := CombinedStatus{
+				SHA:      "SHA",
+				Statuses: []Status{{Context: "foo"}},
+			}
+			b, err := json.Marshal(statuses)
+			if err != nil {
+				t.Fatalf("Didn't expect error: %v", err)
+			}
+			w.Header().Set("Link", fmt.Sprintf(`<blorp>; rel="first", <https://%s/someotherpath>; rel="next"`, r.Host))
+			fmt.Fprint(w, string(b))
+		} else if r.URL.Path == "/someotherpath" {
+			statuses := CombinedStatus{
+				SHA:      "SHA",
+				Statuses: []Status{{Context: "bar"}},
+			}
+			b, err := json.Marshal(statuses)
+			if err != nil {
+				t.Fatalf("Didn't expect error: %v", err)
+			}
+			fmt.Fprint(w, string(b))
+		} else {
+			t.Errorf("Bad request path: %s", r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	c := getClient(ts.URL)
+	combined, err := c.GetCombinedStatus("k8s", "kuber", "SHA")
+	if err != nil {
+		t.Errorf("Didn't expect error: %v", err)
+	} else if combined.SHA != "SHA" {
+		t.Errorf("Expected SHA 'SHA', found %s", combined.SHA)
+	} else if len(combined.Statuses) != 2 {
+		t.Errorf("Expected two statuses, found %d: %v", len(combined.Statuses), combined.Statuses)
+	} else if combined.Statuses[0].Context != "foo" || combined.Statuses[1].Context != "bar" {
+		t.Errorf("Wrong review IDs: %v", combined.Statuses)
 	}
 }

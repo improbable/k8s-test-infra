@@ -1,3 +1,5 @@
+load("@pylint_deps//:requirements.bzl", "requirement")
+
 package(default_visibility = ["//visibility:public"])
 
 py_test(
@@ -26,13 +28,15 @@ sh_test(
     tags = ["lint"],
 )
 
+MISSPELL = "@com_github_client9_misspell//cmd/misspell"
+
 sh_test(
     name = "verify-spelling",
     srcs = ["verify-spelling.sh"],
-    args = ["-m $(location //vendor/github.com/client9/misspell/cmd/misspell)"],
+    args = ["-m $(location %s)" % MISSPELL],
     data = [
         "//:all-srcs",
-        "//vendor/github.com/client9/misspell/cmd/misspell",
+        MISSPELL,
     ],
     tags = ["lint"],
 )
@@ -58,6 +62,7 @@ py_binary(
         "@requests",  # TODO(fejta): figure out a better solution
         "@ruamel_yaml//ruamel/yaml:ruamel.yaml",
         "@yaml",
+        requirement("setuptools"),
     ],
 )
 

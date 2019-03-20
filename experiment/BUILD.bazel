@@ -5,6 +5,20 @@ py_binary(
 )
 
 py_binary(
+    name = "manage_release_versions",
+    srcs = ["manage_release_versions.py"],
+    data = [
+        "//:test-infra-README",
+        "//config:prowjobs",
+        "//experiment:fix_testgrid_config.py",
+        "//images/kubekins-e2e:all-srcs",
+        "//scenarios:kubernetes_verify.py",
+        "//testgrid:config-yaml",
+    ],
+    deps = ["@ruamel_yaml//ruamel/yaml:ruamel.yaml"],
+)
+
+py_binary(
     name = "generate_tests",
     srcs = ["generate_tests.py"],
     data = [
@@ -36,11 +50,17 @@ filegroup(
     name = "all-srcs",
     srcs = [
         ":package-srcs",
+        "//experiment/add-hook:all-srcs",
         "//experiment/aws-stockout:all-srcs",
-        "//experiment/bootstrap:all-srcs",
         "//experiment/ci-janitor:all-srcs",
         "//experiment/coverage:all-srcs",
         "//experiment/manual-trigger:all-srcs",
+        "//experiment/resultstore:all-srcs",
+        "//experiment/slack-oncall-updater:all-srcs",
+        "//experiment/slack/slack:all-srcs",
+        "//experiment/slack/slack-event-log:all-srcs",
+        "//experiment/slack/slack-report-message:all-srcs",
+        "//experiment/slack/slack-welcomer:all-srcs",
         "//experiment/tracer:all-srcs",
     ],
     tags = ["automanaged"],

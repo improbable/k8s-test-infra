@@ -11,7 +11,7 @@ presubmits:
       preset-bazel-remote-cache-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-experimental
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-experimental
         args:
         - "--job=$(JOB_NAME)"
         - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
@@ -39,7 +39,7 @@ presubmits:
       preset-bazel-remote-cache-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-experimental
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-experimental
         args:
         - "--job=$(JOB_NAME)"
         - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
@@ -57,6 +57,8 @@ presubmits:
             memory: "2Gi"
 
   - name: pull-kops-e2e-kubernetes-aws
+    branches:
+    - master
     always_run: true
     labels:
       preset-service-account: "true"
@@ -66,7 +68,7 @@ presubmits:
       preset-e2e-platform-aws: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
         args:
         - --root=/go/src
         - --job=$(JOB_NAME)
@@ -187,7 +189,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
       args:
       - --repo=k8s.io/kops
       - --repo=k8s.io/release
@@ -201,3 +203,33 @@ periodics:
       # docker-in-docker needs privileged mode
       securityContext:
         privileged: true
+
+postsubmits:
+  kubernetes/kops:
+  - name: kops-postsubmit
+    branches:
+    - master
+    labels:
+      preset-service-account: "true"
+      preset-bazel-scratch-dir: "true"
+      preset-bazel-remote-cache-enabled: "true"
+    spec:
+      containers:
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-experimental
+        args:
+        - "--job=$(JOB_NAME)"
+        - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
+        - "--service-account=/etc/service-account/service-account.json"
+        - "--upload=gs://kubernetes-jenkins/logs"
+        - "--timeout=60"
+        - "--scenario=kubernetes_execute_bazel"
+        - "--" # end bootstrap args, scenario args below
+        - "make"
+        - "prow-postsubmit"
+        - "UPLOAD_DEST=gs://kubernetes-release-dev/kops/ci"
+        # Bazel needs privileged mode in order to sandbox builds.
+        securityContext:
+          privileged: true
+        resources:
+          requests:
+            memory: "2Gi"

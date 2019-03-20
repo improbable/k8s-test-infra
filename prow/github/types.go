@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	// EventGUID is sent by Github in a header of every webhook request.
+	// EventGUID is sent by GitHub in a header of every webhook request.
 	// Used as a log field across prow.
 	EventGUID = "event-GUID"
 	// PrLogField is the number of a PR.
@@ -146,10 +146,11 @@ type CombinedStatus struct {
 
 // User is a GitHub user account.
 type User struct {
-	Login string `json:"login"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
-	ID    int    `json:"id"`
+	Login   string `json:"login"`
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	ID      int    `json:"id"`
+	HTMLURL string `json:"html_url"`
 }
 
 // NormLogin normalizes GitHub login strings
@@ -198,7 +199,7 @@ type PullRequestEvent struct {
 	// and deserialize later as this is a polymorphic field
 	Changes json.RawMessage `json:"changes"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -214,6 +215,7 @@ type PullRequest struct {
 	RequestedReviewers []User            `json:"requested_reviewers"`
 	Assignees          []User            `json:"assignees"`
 	State              string            `json:"state"`
+	Draft              bool              `json:"draft"`
 	Merged             bool              `json:"merged"`
 	CreatedAt          time.Time         `json:"created_at,omitempty"`
 	UpdatedAt          time.Time         `json:"updated_at,omitempty"`
@@ -333,6 +335,38 @@ type Restrictions struct {
 	Teams *[]string `json:"teams,omitempty"`
 }
 
+// HookConfig holds the endpoint and its secret.
+type HookConfig struct {
+	URL         string  `json:"url"`
+	ContentType *string `json:"content_type,omitempty"`
+	Secret      *string `json:"secret,omitempty"`
+}
+
+// Hook holds info about the webhook configuration.
+type Hook struct {
+	ID     int        `json:"id"`
+	Name   string     `json:"name"`
+	Events []string   `json:"events"`
+	Active bool       `json:"active"`
+	Config HookConfig `json:"config"`
+}
+
+// HookRequest can create and/or edit a webhook.
+//
+// AddEvents and RemoveEvents are only valid during an edit, and only for a repo
+type HookRequest struct {
+	Name         string      `json:"name,omitempty"` // must be web or "", only create
+	Active       *bool       `json:"active,omitempty"`
+	AddEvents    []string    `json:"add_events,omitempty"` // only repo edit
+	Config       *HookConfig `json:"config,omitempty"`
+	Events       []string    `json:"events,omitempty"`
+	RemoveEvents []string    `json:"remove_events,omitempty"` // only repo edit
+}
+
+// AllHookEvents causes github to send all events.
+// https://developer.github.com/v3/activity/events/types/
+var AllHookEvents = []string{"*"}
+
 // IssueEventAction enumerates the triggers for this
 // webhook payload type. See also:
 // https://developer.github.com/v3/activity/events/types/#issuesevent
@@ -369,7 +403,7 @@ type IssueEvent struct {
 	// Label is specified for IssueActionLabeled and IssueActionUnlabeled events.
 	Label Label `json:"label"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -403,7 +437,7 @@ type IssueCommentEvent struct {
 	Comment IssueComment            `json:"comment"`
 	Repo    Repo                    `json:"repository"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -479,7 +513,7 @@ type StatusEvent struct {
 	Sender      User   `json:"sender,omitempty"`
 	Repo        Repo   `json:"repository,omitempty"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -505,7 +539,7 @@ type PushEvent struct {
 	Sender User `json:"sender"`
 	Repo   Repo `json:"repository"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -555,7 +589,7 @@ type ReviewEvent struct {
 	Repo        Repo              `json:"repository"`
 	Review      Review            `json:"review"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -602,7 +636,7 @@ type ReviewCommentEvent struct {
 	Repo        Repo                     `json:"repository"`
 	Comment     ReviewComment            `json:"comment"`
 
-	// GUID is included in the header of the request received by Github.
+	// GUID is included in the header of the request received by GitHub.
 	GUID string
 }
 
@@ -778,4 +812,42 @@ type GenericCommentEvent struct {
 type Milestone struct {
 	Title  string `json:"title"`
 	Number int    `json:"number"`
+}
+
+// RepositoryCommit represents a commit in a repo.
+// Note that it's wrapping a GitCommit, so author/committer information is in two places,
+// but contain different details about them: in RepositoryCommit "github details", in GitCommit - "git details".
+type RepositoryCommit struct {
+	SHA         string    `json:"sha"`
+	Commit      GitCommit `json:"commit"`
+	Author      User      `json:"author"`
+	Committer   User      `json:"committer"`
+	Parents     []Commit  `json:"parents,omitempty"`
+	HTMLURL     string    `json:"html_url"`
+	URL         string    `json:"url"`
+	CommentsURL string    `json:"comments_url"`
+}
+
+// GitCommit represents a GitHub commit.
+type GitCommit struct {
+	SHA     string `json:"sha,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// Project is a github project
+type Project struct {
+	Name string `json:"name"`
+	ID   int    `json:"id"`
+}
+
+// ProjectColumn is a colunm in a github project
+type ProjectColumn struct {
+	Name string `json:"name"`
+	ID   int    `json:"id"`
+}
+
+// ProjectCard is a github project card
+type ProjectCard struct {
+	ContentID   int    `json:"content_id"`
+	ContentType string `json:"content_type"`
 }

@@ -7,7 +7,7 @@ presubmits:
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/bootstrap:v20180912-f97e35a46
+      - image: gcr.io/k8s-testimages/bootstrap:v20190211-fab6034b4
         args:
         - "--job=$(JOB_NAME)"
         - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
@@ -24,25 +24,33 @@ presubmits:
         resources:
           requests:
             cpu: 4
-  - name: pull-kubernetes-integration-prow
+
+  # TODO(krzyzacy): add branches once this works
+  # TODO(krzyzacy): Consider combine kubekins-e2e and kubekins-test
+  - name: pull-kubernetes-integration-podutil
     always_run: false
+    decorate: true
+    branches:
+    - master
+    path_alias: k8s.io/kubernetes
     labels:
       preset-service-account: "true"
       preset-dind-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/bootstrap:latest
+      - image: gcr.io/k8s-testimages/kubekins-e2e:latest-master
         imagePullPolicy: Always
+        command:
+        - runner.sh
         args:
-        - "--job=$(JOB_NAME)"
-        - "--repo=k8s.io/$(REPO_NAME)=$(PULL_REFS)"
-        - "--service-account=/etc/service-account/service-account.json"
-        - "--upload=gs://kubernetes-jenkins/pr-logs"
-        - "--timeout=60"
-        - --scenario=kubernetes_verify
-        - --
-        - "--branch=${PULL_BASE_REF}"
-        - --prow
+        - ./hack/jenkins/test-dockerized.sh
+        env:
+        - name: KUBE_FORCE_VERIFY_CHECKS
+          value: "n"
+        - name: KUBE_VERIFY_GIT_BRANCH
+          value: master
+        - name: REPO_DIR
+          value: /workspace/k8s.io/kubernetes
         # docker-in-docker needs privileged mode
         securityContext:
           privileged: true
@@ -58,7 +66,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/bootstrap:v20180912-f97e35a46
+    - image: gcr.io/k8s-testimages/bootstrap:v20190211-fab6034b4
       args:
       - --repo=k8s.io/kubernetes
       - --timeout=100
@@ -74,7 +82,7 @@ periodics:
         requests:
           cpu: 4
 
-# manual-release-bump-required
+  # manual-release-bump-required
 - interval: 2h
   name: ci-kubernetes-integration-beta
   labels:
@@ -82,7 +90,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/bootstrap:v20180912-f97e35a46
+    - image: gcr.io/k8s-testimages/bootstrap:v20190211-fab6034b4
       args:
       - --repo=k8s.io/kubernetes=release-1.13
       - --timeout=100
@@ -106,13 +114,13 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/bootstrap:v20180912-f97e35a46
+    - image: gcr.io/k8s-testimages/bootstrap:v20190211-fab6034b4
       args:
-      - --repo=k8s.io/kubernetes=release-1.12
+      - --repo=k8s.io/kubernetes=release-1.13
       - --timeout=100
       - --scenario=kubernetes_verify
       - --
-      - --branch=release-1.12
+      - --branch=release-1.13
       - --force
       - --prow
       # docker-in-docker needs privileged mode
@@ -130,13 +138,13 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/bootstrap:v20180912-f97e35a46
+    - image: gcr.io/k8s-testimages/bootstrap:v20190211-fab6034b4
       args:
-      - --repo=k8s.io/kubernetes=release-1.11
+      - --repo=k8s.io/kubernetes=release-1.12
       - --timeout=100
       - --scenario=kubernetes_verify
       - --
-      - --branch=release-1.11
+      - --branch=release-1.12
       - --force
       - --prow
       # docker-in-docker needs privileged mode
@@ -154,13 +162,13 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/bootstrap:v20180912-f97e35a46
+    - image: gcr.io/k8s-testimages/bootstrap:v20190211-fab6034b4
       args:
-      - --repo=k8s.io/kubernetes=release-1.10
+      - --repo=k8s.io/kubernetes=release-1.11
       - --timeout=100
       - --scenario=kubernetes_verify
       - --
-      - --branch=release-1.10
+      - --branch=release-1.11
       - --force
       - --prow
       # docker-in-docker needs privileged mode

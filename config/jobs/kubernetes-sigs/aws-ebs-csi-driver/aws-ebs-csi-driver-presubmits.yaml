@@ -1,17 +1,18 @@
 presubmits:
   kubernetes-sigs/aws-ebs-csi-driver:
-  - name: pull-aws-ebs-disk-csi-driver-verify
+  - name: pull-aws-ebs-csi-driver-verify
     always_run: true
     decorate: true
     labels:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
         command:
         - runner.sh
         args:
-        - hack/verify-all.sh
+        - make
+        - verify
   - name: pull-aws-ebs-csi-driver-unit
     always_run: true
     decorate: true
@@ -19,7 +20,7 @@ presubmits:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
         command:
         - runner.sh
         args:
@@ -32,9 +33,57 @@ presubmits:
       preset-service-account: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20181203-a441fa430-master
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
         command:
         - runner.sh
         args:
         - make
         - test-sanity
+  - name: pull-aws-ebs-csi-driver-integration
+    always_run: true
+    decorate: true
+    labels:
+      preset-service-account: "true"
+      preset-aws-credential-aws-oss-testing: "true"
+    spec:
+      containers:
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+        command:
+        - runner.sh
+        args:
+        - make
+        - test-integration
+  - name: pull-aws-ebs-csi-driver-e2e-single-az
+    always_run: true
+    decorate: true
+    labels:
+      preset-service-account: "true"
+      preset-dind-enabled: "true"
+      preset-aws-credential-aws-oss-testing: "true"
+    spec:
+      containers:
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+        command:
+        - runner.sh
+        args:
+        - make
+        - test-e2e-single-az
+        securityContext:
+          privileged: true
+  - name: pull-aws-ebs-csi-driver-e2e-multi-az
+    always_run: true
+    decorate: true
+    labels:
+      preset-service-account: "true"
+      preset-dind-enabled: "true"
+      preset-aws-credential-aws-oss-testing: "true"
+    spec:
+      containers:
+      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+        command:
+        - runner.sh
+        args:
+        - make
+        - test-e2e-multi-az
+        securityContext:
+          privileged: true

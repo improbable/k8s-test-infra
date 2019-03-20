@@ -18,6 +18,7 @@ package lgtm
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func (f *fakeOwnersClient) LoadRepoAliases(org, repo, base string) (repoowners.R
 	return nil, nil
 }
 
-func (f *fakeOwnersClient) LoadRepoOwners(org, repo, base string) (repoowners.RepoOwnerInterface, error) {
+func (f *fakeOwnersClient) LoadRepoOwners(org, repo, base string) (repoowners.RepoOwner, error) {
 	return &fakeRepoOwners{approvers: f.approvers, reviewers: f.reviewers}, nil
 }
 
@@ -52,19 +53,19 @@ type fakeRepoOwners struct {
 }
 
 type fakePruner struct {
-	GithubClient  *fakegithub.FakeClient
+	GitHubClient  *fakegithub.FakeClient
 	IssueComments []github.IssueComment
 }
 
 func (fp *fakePruner) PruneComments(shouldPrune func(github.IssueComment) bool) {
 	for _, comment := range fp.IssueComments {
 		if shouldPrune(comment) {
-			fp.GithubClient.IssueCommentsDeleted = append(fp.GithubClient.IssueCommentsDeleted, comment.Body)
+			fp.GitHubClient.IssueCommentsDeleted = append(fp.GitHubClient.IssueCommentsDeleted, comment.Body)
 		}
 	}
 }
 
-var _ repoowners.RepoOwnerInterface = &fakeRepoOwners{}
+var _ repoowners.RepoOwner = &fakeRepoOwners{}
 
 func (f *fakeRepoOwners) FindApproverOwnersForFile(path string) string  { return "" }
 func (f *fakeRepoOwners) FindReviewersOwnersForFile(path string) string { return "" }
@@ -291,7 +292,7 @@ func TestLGTMComment(t *testing.T) {
 			StoreTreeHash: true,
 		})
 		fp := &fakePruner{
-			GithubClient:  fc,
+			GitHubClient:  fc,
 			IssueComments: fc.IssueComments[5],
 		}
 		if err := handleGenericComment(fc, pc, oc, logrus.WithField("plugin", PluginName), fp, *e); err != nil {
@@ -445,7 +446,7 @@ func TestLGTMCommentWithLGTMNoti(t *testing.T) {
 		oc := &fakeOwnersClient{approvers: approvers, reviewers: reviewers}
 		pc := &plugins.Configuration{}
 		fp := &fakePruner{
-			GithubClient:  fc,
+			GitHubClient:  fc,
 			IssueComments: fc.IssueComments[5],
 		}
 		if err := handleGenericComment(fc, pc, oc, logrus.WithField("plugin", PluginName), fp, *e); err != nil {
@@ -611,7 +612,7 @@ func TestLGTMFromApproveReview(t *testing.T) {
 			StoreTreeHash: tc.storeTreeHash,
 		})
 		fp := &fakePruner{
-			GithubClient:  fc,
+			GitHubClient:  fc,
 			IssueComments: fc.IssueComments[5],
 		}
 		if err := handlePullRequestReview(fc, pc, oc, logrus.WithField("plugin", PluginName), fp, *e); err != nil {
@@ -860,6 +861,39 @@ func TestHandlePullRequest(t *testing.T) {
 			},
 			expectNoComments: false,
 		},
+		{
+			name: "pr_synchronize, 2 tree-hash comments, keep label",
+			event: github.PullRequestEvent{
+				Action: github.PullRequestActionSynchronize,
+				PullRequest: github.PullRequest{
+					Number: 101,
+					Base: github.PullRequestBranch{
+						Repo: github.Repo{
+							Owner: github.User{
+								Login: "kubernetes",
+							},
+							Name: "kubernetes",
+						},
+					},
+					Head: github.PullRequestBranch{
+						SHA: SHA,
+					},
+				},
+			},
+			issueComments: map[int][]github.IssueComment{
+				101: {
+					{
+						Body: fmt.Sprintf(addLGTMLabelNotification, "older_treeSHA"),
+						User: github.User{Login: fakegithub.Bot},
+					},
+					{
+						Body: fmt.Sprintf(addLGTMLabelNotification, treeSHA),
+						User: github.User{Login: fakegithub.Bot},
+					},
+				},
+			},
+			expectNoComments: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1044,7 +1078,7 @@ func TestRemoveTreeHashComment(t *testing.T) {
 	}
 	fc.IssueLabelsAdded = []string{"kubernetes/kubernetes#101:" + LGTMLabel}
 	fp := &fakePruner{
-		GithubClient:  fc,
+		GitHubClient:  fc,
 		IssueComments: fc.IssueComments[101],
 	}
 	handle(false, pc, &fakeOwnersClient{}, rc, fc, logrus.WithField("plugin", PluginName), fp)
@@ -1057,5 +1091,82 @@ func TestRemoveTreeHashComment(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected deleted tree_hash comment but got none")
+	}
+}
+
+func TestHelpProvider(t *testing.T) {
+	cases := []struct {
+		name               string
+		config             *plugins.Configuration
+		enabledRepos       []string
+		err                bool
+		configInfoIncludes []string
+		configInfoExcludes []string
+	}{
+		{
+			name:               "Empty config",
+			config:             &plugins.Configuration{},
+			enabledRepos:       []string{"org1", "org2/repo"},
+			configInfoExcludes: []string{configInfoReviewActsAsLgtm, configInfoStoreTreeHash, configInfoStickyLgtmTeam("team1")},
+		},
+		{
+			name:               "Overlapping org and org/repo",
+			config:             &plugins.Configuration{},
+			enabledRepos:       []string{"org2", "org2/repo"},
+			configInfoExcludes: []string{configInfoReviewActsAsLgtm, configInfoStoreTreeHash, configInfoStickyLgtmTeam("team1")},
+		},
+		{
+			name:         "Invalid enabledRepos",
+			config:       &plugins.Configuration{},
+			enabledRepos: []string{"org1", "org2/repo/extra"},
+			err:          true,
+		},
+		{
+			name: "StoreTreeHash enabled",
+			config: &plugins.Configuration{
+				Lgtm: []plugins.Lgtm{
+					{
+						Repos:         []string{"org2"},
+						StoreTreeHash: true,
+					},
+				},
+			},
+			enabledRepos:       []string{"org1", "org2/repo"},
+			configInfoExcludes: []string{configInfoReviewActsAsLgtm, configInfoStickyLgtmTeam("team1")},
+			configInfoIncludes: []string{configInfoStoreTreeHash},
+		},
+		{
+			name: "All configs enabled",
+			config: &plugins.Configuration{
+				Lgtm: []plugins.Lgtm{
+					{
+						Repos:            []string{"org2"},
+						ReviewActsAsLgtm: true,
+						StoreTreeHash:    true,
+						StickyLgtmTeam:   "team1",
+					},
+				},
+			},
+			enabledRepos:       []string{"org1", "org2/repo"},
+			configInfoIncludes: []string{configInfoReviewActsAsLgtm, configInfoStoreTreeHash, configInfoStickyLgtmTeam("team1")},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pluginHelp, err := helpProvider(c.config, c.enabledRepos)
+			if err != nil && !c.err {
+				t.Fatalf("helpProvider error: %v", err)
+			}
+			for _, msg := range c.configInfoExcludes {
+				if strings.Contains(pluginHelp.Config["org2/repo"], msg) {
+					t.Fatalf("helpProvider.Config error mismatch: got %v, but didn't want it", msg)
+				}
+			}
+			for _, msg := range c.configInfoIncludes {
+				if !strings.Contains(pluginHelp.Config["org2/repo"], msg) {
+					t.Fatalf("helpProvider.Config error mismatch: didn't get %v, but wanted it", msg)
+				}
+			}
+		})
 	}
 }

@@ -35,11 +35,11 @@ const (
 	// PresubmitJob means it runs on unmerged PRs.
 	PresubmitJob ProwJobType = "presubmit"
 	// PostsubmitJob means it runs on each new commit.
-	PostsubmitJob = "postsubmit"
+	PostsubmitJob ProwJobType = "postsubmit"
 	// Periodic job means it runs on a time-basis, unrelated to git changes.
-	PeriodicJob = "periodic"
+	PeriodicJob ProwJobType = "periodic"
 	// BatchJob tests multiple unmerged PRs at the same time.
-	BatchJob = "batch"
+	BatchJob ProwJobType = "batch"
 )
 
 // ProwJobState specifies whether the job is running
@@ -50,15 +50,15 @@ const (
 	// TriggeredState means the job has been created but not yet scheduled.
 	TriggeredState ProwJobState = "triggered"
 	// PendingState means the job is scheduled but not yet running.
-	PendingState = "pending"
+	PendingState ProwJobState = "pending"
 	// SuccessState means the job completed without error (exit 0)
-	SuccessState = "success"
+	SuccessState ProwJobState = "success"
 	// FailureState means the job completed with errors (exit non-zero)
-	FailureState = "failure"
+	FailureState ProwJobState = "failure"
 	// AbortedState means prow killed the job early (new commit pushed, perhaps).
-	AbortedState = "aborted"
+	AbortedState ProwJobState = "aborted"
 	// ErrorState means the job could not schedule (bad config, perhaps).
-	ErrorState = "error"
+	ErrorState ProwJobState = "error"
 )
 
 // ProwJobAgent specifies the controller (such as plank or jenkins-agent) that runs the job.
@@ -68,9 +68,9 @@ const (
 	// KubernetesAgent means prow will create a pod to run this job.
 	KubernetesAgent ProwJobAgent = "kubernetes"
 	// JenkinsAgent means prow will schedule the job on jenkins.
-	JenkinsAgent = "jenkins"
+	JenkinsAgent ProwJobAgent = "jenkins"
 	// KnativeBuildAgent means prow will schedule the job via a build-crd resource.
-	KnativeBuildAgent = "knative-build"
+	KnativeBuildAgent ProwJobAgent = "knative-build"
 )
 
 const (
@@ -146,10 +146,6 @@ type ProwJobSpec struct {
 	// DecorationConfig holds configuration options for
 	// decorating PodSpecs that users provide
 	DecorationConfig *DecorationConfig `json:"decoration_config,omitempty"`
-
-	// RunAfterSuccess are jobs that should be triggered if
-	// this job runs and does not fail
-	RunAfterSuccess []ProwJobSpec `json:"run_after_success,omitempty"`
 }
 
 // DecorationConfig specifies how to augment pods.
@@ -171,12 +167,12 @@ type DecorationConfig struct {
 	// artifacts to GCS from a job.
 	GCSConfiguration *GCSConfiguration `json:"gcs_configuration,omitempty"`
 	// GCSCredentialsSecret is the name of the Kubernetes secret
-	// that holds GCS push credentials
+	// that holds GCS push credentials.
 	GCSCredentialsSecret string `json:"gcs_credentials_secret,omitempty"`
 	// SSHKeySecrets are the names of Kubernetes secrets that contain
-	// SSK keys which should be used during the cloning process
+	// SSK keys which should be used during the cloning process.
 	SSHKeySecrets []string `json:"ssh_key_secrets,omitempty"`
-	// SSHHostFingerprints are the fingerprints of known ssh hosts
+	// SSHHostFingerprints are the fingerprints of known SSH hosts
 	// that the cloning process can trust.
 	// Create with ssh-keyscan [-t rsa] host
 	SSHHostFingerprints []string `json:"ssh_host_fingerprints,omitempty"`
@@ -188,6 +184,8 @@ type DecorationConfig struct {
 	CookiefileSecret string `json:"cookiefile_secret,omitempty"`
 }
 
+// ApplyDefault applies the defaults for the ProwJob decoration. If a field has a zero value, it
+// replaces that with the value set in def.
 func (d *DecorationConfig) ApplyDefault(def *DecorationConfig) *DecorationConfig {
 	if d == nil && def == nil {
 		return nil
@@ -229,6 +227,7 @@ func (d *DecorationConfig) ApplyDefault(def *DecorationConfig) *DecorationConfig
 	return &merged
 }
 
+// Validate ensures all the values set in the DecorationConfig are valid.
 func (d *DecorationConfig) Validate() error {
 	if d.UtilityImages == nil {
 		return errors.New("utility image config is not specified")
@@ -275,6 +274,8 @@ type UtilityImages struct {
 	Sidecar string `json:"sidecar,omitempty"`
 }
 
+// ApplyDefault applies the defaults for the UtilityImages decorations. If a field has a zero value,
+// it replaces that with the value set in def.
 func (u *UtilityImages) ApplyDefault(def *UtilityImages) *UtilityImages {
 	if u == nil {
 		return def
@@ -325,6 +326,8 @@ type GCSConfiguration struct {
 	DefaultRepo string `json:"default_repo,omitempty"`
 }
 
+// ApplyDefault applies the defaults for GCSConfiguration decorations. If a field has a zero value,
+// it replaces that with the value set in def.
 func (g *GCSConfiguration) ApplyDefault(def *GCSConfiguration) *GCSConfiguration {
 	if g == nil && def == nil {
 		return nil
@@ -357,6 +360,7 @@ func (g *GCSConfiguration) ApplyDefault(def *GCSConfiguration) *GCSConfiguration
 	return &merged
 }
 
+// Validate ensures all the values set in the GCSConfiguration are valid.
 func (g *GCSConfiguration) Validate() error {
 	if g.PathStrategy != PathStrategyLegacy && g.PathStrategy != PathStrategyExplicit && g.PathStrategy != PathStrategySingle {
 		return fmt.Errorf("gcs_path_strategy must be one of %q, %q, or %q", PathStrategyLegacy, PathStrategyExplicit, PathStrategySingle)
@@ -423,26 +427,37 @@ func (j *ProwJob) ClusterAlias() string {
 
 // Pull describes a pull request at a particular point in time.
 type Pull struct {
-	Number int    `json:"number,omitempty"`
-	Author string `json:"author,omitempty"`
-	SHA    string `json:"sha,omitempty"`
+	Number int    `json:"number"`
+	Author string `json:"author"`
+	SHA    string `json:"sha"`
+	Title  string `json:"title,omitempty"`
 
 	// Ref is git ref can be checked out for a change
 	// for example,
 	// github: pull/123/head
 	// gerrit: refs/changes/00/123/1
 	Ref string `json:"ref,omitempty"`
+	// Link links to the pull request itself.
+	Link string `json:"link,omitempty"`
+	// CommitLink links to the commit identified by the SHA.
+	CommitLink string `json:"commit_link,omitempty"`
+	// AuthorLink links to the author of the pull request.
+	AuthorLink string `json:"author_link,omitempty"`
 }
 
 // Refs describes how the repo was constructed.
 type Refs struct {
 	// Org is something like kubernetes or k8s.io
-	Org string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// Repo is something like test-infra
-	Repo string `json:"repo,omitempty"`
+	Repo string `json:"repo"`
+	// RepoLink links to the source for Repo.
+	RepoLink string `json:"repo_link,omitempty"`
 
 	BaseRef string `json:"base_ref,omitempty"`
 	BaseSHA string `json:"base_sha,omitempty"`
+	// BaseLink is a link to the commit identified by BaseSHA.
+	BaseLink string `json:"base_link,omitempty"`
 
 	Pulls []Pull `json:"pulls,omitempty"`
 
@@ -461,7 +476,13 @@ type Refs struct {
 }
 
 func (r Refs) String() string {
-	rs := []string{fmt.Sprintf("%s:%s", r.BaseRef, r.BaseSHA)}
+	rs := []string{}
+	if r.BaseSHA != "" {
+		rs = append(rs, fmt.Sprintf("%s:%s", r.BaseRef, r.BaseSHA))
+	} else {
+		rs = append(rs, r.BaseRef)
+	}
+
 	for _, pull := range r.Pulls {
 		ref := fmt.Sprintf("%d:%s", pull.Number, pull.SHA)
 

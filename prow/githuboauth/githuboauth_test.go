@@ -38,7 +38,7 @@ const mockAccessToken = "justSomeRandomSecretToken"
 
 type MockOAuthClient struct{}
 
-func (c *MockOAuthClient) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
+func (c *MockOAuthClient) Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
 	return &oauth2.Token{
 		AccessToken: mockAccessToken,
 	}, nil
@@ -48,14 +48,14 @@ func (c *MockOAuthClient) AuthCodeURL(state string, opts ...oauth2.AuthCodeOptio
 	return "mock-auth-url"
 }
 
-func getMockConfig(cookie *sessions.CookieStore) *config.GithubOAuthConfig {
-	clientId := "mock-client-id"
+func getMockConfig(cookie *sessions.CookieStore) *config.GitHubOAuthConfig {
+	clientID := "mock-client-id"
 	clientSecret := "mock-client-secret"
 	redirectURL := "/uni-test/redirect-url"
 	scopes := []string{}
 
-	return &config.GithubOAuthConfig{
-		ClientID:         clientId,
+	return &config.GitHubOAuthConfig{
+		ClientID:         clientID,
 		ClientSecret:     clientSecret,
 		RedirectURL:      redirectURL,
 		Scopes:           scopes,
@@ -65,7 +65,7 @@ func getMockConfig(cookie *sessions.CookieStore) *config.GithubOAuthConfig {
 	}
 }
 
-func createMockStateToken(config *config.GithubOAuthConfig) string {
+func createMockStateToken(config *config.GitHubOAuthConfig) string {
 	stateToken := xsrftoken.Generate(config.ClientSecret, "", "")
 	state := hex.EncodeToString([]byte(stateToken))
 
@@ -83,13 +83,13 @@ func TestHandleLogin(t *testing.T) {
 	cookie := sessions.NewCookieStore([]byte("secret-key"))
 	mockConfig := getMockConfig(cookie)
 	mockLogger := logrus.WithField("uni-test", "githuboauth")
-	mockGithubOAuthAgent := NewGithubOAuthAgent(mockConfig, mockLogger)
+	mockAgent := NewAgent(mockConfig, mockLogger)
 	mockOAuthClient := &MockOAuthClient{}
 
 	mockRequest := httptest.NewRequest(http.MethodGet, "/mock-login", nil)
 	mockResponse := httptest.NewRecorder()
 
-	handleLoginFn := mockGithubOAuthAgent.HandleLogin(mockOAuthClient)
+	handleLoginFn := mockAgent.HandleLogin(mockOAuthClient)
 	handleLoginFn.ServeHTTP(mockResponse, mockRequest)
 	result := mockResponse.Result()
 	if result.StatusCode != http.StatusFound {
@@ -131,7 +131,7 @@ func TestHandleLogout(t *testing.T) {
 	cookie := sessions.NewCookieStore([]byte("secret-key"))
 	mockConfig := getMockConfig(cookie)
 	mockLogger := logrus.WithField("uni-test", "githuboauth")
-	mockGithubOAuthAgent := NewGithubOAuthAgent(mockConfig, mockLogger)
+	mockAgent := NewAgent(mockConfig, mockLogger)
 	mockOAuthClient := &MockOAuthClient{}
 
 	mockRequest := httptest.NewRequest(http.MethodGet, "/mock-logout", nil)
@@ -141,7 +141,7 @@ func TestHandleLogout(t *testing.T) {
 	}
 	mockResponse := httptest.NewRecorder()
 
-	handleLoginFn := mockGithubOAuthAgent.HandleLogout(mockOAuthClient)
+	handleLoginFn := mockAgent.HandleLogout(mockOAuthClient)
 	handleLoginFn.ServeHTTP(mockResponse, mockRequest)
 	result := mockResponse.Result()
 	if result.StatusCode != http.StatusFound {
@@ -171,7 +171,7 @@ func TestHandleLogoutWithLoginSession(t *testing.T) {
 	cookie := sessions.NewCookieStore([]byte("secret-key"))
 	mockConfig := getMockConfig(cookie)
 	mockLogger := logrus.WithField("uni-test", "githuboauth")
-	mockGithubOAuthAgent := NewGithubOAuthAgent(mockConfig, mockLogger)
+	mockAgent := NewAgent(mockConfig, mockLogger)
 	mockOAuthClient := &MockOAuthClient{}
 
 	mockRequest := httptest.NewRequest(http.MethodGet, "/mock-logout", nil)
@@ -186,7 +186,7 @@ func TestHandleLogoutWithLoginSession(t *testing.T) {
 	}
 	mockResponse := httptest.NewRecorder()
 
-	handleLoginFn := mockGithubOAuthAgent.HandleLogout(mockOAuthClient)
+	handleLoginFn := mockAgent.HandleLogout(mockOAuthClient)
 	handleLoginFn.ServeHTTP(mockResponse, mockRequest)
 	result := mockResponse.Result()
 	if result.StatusCode != http.StatusFound {
@@ -208,11 +208,11 @@ func TestHandleLogoutWithLoginSession(t *testing.T) {
 	}
 }
 
-type fakeGithubClient struct {
+type fakeGitHubClient struct {
 	login string
 }
 
-func (fgc *fakeGithubClient) GetUser(login string) (*github.User, error) {
+func (fgc *fakeGitHubClient) GetUser(login string) (*github.User, error) {
 	return &github.User{
 		Login: &fgc.login,
 	}, nil
@@ -222,8 +222,8 @@ type fakeGetter struct {
 	login string
 }
 
-func (fgc *fakeGetter) GetGithubClient(accessToken string, dryRun bool) GithubClientWrapper {
-	return &fakeGithubClient{login: fgc.login}
+func (fgc *fakeGetter) GetGitHubClient(accessToken string, dryRun bool) GitHubClientWrapper {
+	return &fakeGitHubClient{login: fgc.login}
 }
 
 func TestHandleRedirectWithInvalidState(t *testing.T) {
@@ -231,7 +231,7 @@ func TestHandleRedirectWithInvalidState(t *testing.T) {
 	cookie := sessions.NewCookieStore([]byte("secret-key"))
 	mockConfig := getMockConfig(cookie)
 	mockLogger := logrus.WithField("uni-test", "githuboauth")
-	mockGithubOAuthAgent := NewGithubOAuthAgent(mockConfig, mockLogger)
+	mockAgent := NewAgent(mockConfig, mockLogger)
 	mockOAuthClient := &MockOAuthClient{}
 	mockStateToken := createMockStateToken(mockConfig)
 
@@ -246,7 +246,7 @@ func TestHandleRedirectWithInvalidState(t *testing.T) {
 	}
 	mockSession.Values[stateKey] = mockStateToken
 
-	handleLoginFn := mockGithubOAuthAgent.HandleRedirect(mockOAuthClient, &fakeGetter{""})
+	handleLoginFn := mockAgent.HandleRedirect(mockOAuthClient, &fakeGetter{""})
 	handleLoginFn.ServeHTTP(mockResponse, mockRequest)
 	result := mockResponse.Result()
 
@@ -260,7 +260,7 @@ func TestHandleRedirectWithValidState(t *testing.T) {
 	cookie := sessions.NewCookieStore([]byte("secret-key"))
 	mockConfig := getMockConfig(cookie)
 	mockLogger := logrus.WithField("uni-test", "githuboauth")
-	mockGithubOAuthAgent := NewGithubOAuthAgent(mockConfig, mockLogger)
+	mockAgent := NewAgent(mockConfig, mockLogger)
 	mockLogin := "foo_name"
 	mockOAuthClient := &MockOAuthClient{}
 	mockStateToken := createMockStateToken(mockConfig)
@@ -277,7 +277,7 @@ func TestHandleRedirectWithValidState(t *testing.T) {
 	}
 	mockSession.Values[stateKey] = mockStateToken
 
-	handleLoginFn := mockGithubOAuthAgent.HandleRedirect(mockOAuthClient, &fakeGetter{mockLogin})
+	handleLoginFn := mockAgent.HandleRedirect(mockOAuthClient, &fakeGetter{mockLogin})
 	handleLoginFn.ServeHTTP(mockResponse, mockRequest)
 	result := mockResponse.Result()
 	if result.StatusCode != http.StatusFound {

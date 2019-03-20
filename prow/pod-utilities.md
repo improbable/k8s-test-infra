@@ -27,7 +27,7 @@ Example test container script:
 pwd # my repo root
 ls path/to/file/in/my/repo.txt # access repo file
 ls ../other-repo # access repo file in another repo
-echo success > $ARTIFACTS/results.txt # result info that will be uploaded to GCS.
+echo success > ${ARTIFACTS}/results.txt # result info that will be uploaded to GCS.
 # logs, and job metadata are automatically uploaded.
 ```
 
@@ -47,6 +47,9 @@ to be specified. It indicates an existent directory where job artifacts can be
 dumped for automatic upload to GCS upon job completion.
 
 ### How to configure
+
+In order to use the pod utilities, you will need to configure plank with some settings first.
+See plank's [README](/prow/cmd/plank) for reference.
 
 ProwJobs may request Pod Utility decoration by setting `decorate: true` in their config.
 Example ProwJob configuration:
@@ -86,7 +89,7 @@ the `exta_refs` field.
   decoration_config:
     ssh_key_secrets:
     - ssh-secret
-  clone_uri: "git@github.com:{{.Org}}/{{.Repo}}.git"
+  clone_uri: "git@github.com:<YOUR_ORG>/<YOUR_REPO>.git"
   extra_refs:
   - org: kubernetes
     repo: other-repo

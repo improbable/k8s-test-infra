@@ -20,23 +20,15 @@
 export BAZEL_REMOTE_CACHE_ENABLED=${BAZEL_REMOTE_CACHE_ENABLED:-false}
 if [[ "${BAZEL_REMOTE_CACHE_ENABLED}" == "true" ]]; then
     echo "Bazel remote cache is enabled, generating .bazelrcs ..."
-    # if we have a test-infra checkout (because bootstrap), use that since
-    # it is newer and this is probably k/k so we can push fixes faster this way
-    # otherwise run the one baked into the image
-    # TODO(bentheelder): someday only support the pod-utils
-    if [[ -d "./test-infra" ]]; then
-        ./test-infra/images/bootstrap/create_bazel_cache_rcs.sh
-    else
-        /usr/local/bin/create_bazel_cache_rcs.sh
-    fi
+    /usr/local/bin/create_bazel_cache_rcs.sh
 fi
 
 
 # used by cleanup_dind to ensure binfmt_misc entries are not persisted
-# TODO(bentheelder): consider moving *all* cleanup into a more robust program
+# TODO: consider moving *all* cleanup into a more robust program
 cleanup_binfmt_misc() {
     # make sure the vfs is mounted
-    # TODO(bentheelder): if this logic is moved out and made more general
+    # TODO: if this logic is moved out and made more general
     # we need to check that the host actually has binfmt_misc support first.
     if [ ! -f /proc/sys/fs/binfmt_misc/status ]; then
         mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
@@ -93,15 +85,21 @@ fi
 set +o errexit
 
 # add $GOPATH/bin to $PATH
-export PATH=$GOPATH/bin:$PATH
+export PATH=${GOPATH}/bin:${PATH}
 # Authenticate gcloud, allow failures
 if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
   gcloud auth activate-service-account --key-file="${GOOGLE_APPLICATION_CREDENTIALS}" || true
 fi
 
+# Use a reproducible build date based on the most recent git commit timestamp.
+SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct || true)
+export SOURCE_DATE_EPOCH
+
 # actually start bootstrap and the job
+set -o xtrace
 "$@"
 EXIT_VALUE=$?
+set +o xtrace
 
 # cleanup after job
 if [[ "${DOCKER_IN_DOCKER_ENABLED}" == "true" ]]; then

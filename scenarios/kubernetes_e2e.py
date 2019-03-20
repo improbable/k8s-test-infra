@@ -212,9 +212,9 @@ class LocalMode(object):
         shutil.copy(cred, aws_cred)
 
         self.add_environment(
-            'JENKINS_AWS_SSH_PRIVATE_KEY_FILE=%s' % priv,
-            'JENKINS_AWS_SSH_PUBLIC_KEY_FILE=%s' % pub,
-            'JENKINS_AWS_CREDENTIALS_FILE=%s' % cred,
+            'AWS_SSH_PRIVATE_KEY_FILE=%s' % priv,
+            'AWS_SSH_PUBLIC_KEY_FILE=%s' % pub,
+            'AWS_SHARED_CREDENTIALS_FILE=%s' % cred,
         )
 
     def add_aws_role(self, profile, arn):
@@ -563,9 +563,15 @@ def main(args):
 
     if args.kubeadm:
         version = kubeadm_version(args.kubeadm, shared_build_gcs_path)
+        # try to look for k-a repo
+        kubeadm_path = os.path.join(workspace, 'k8s.io', 'kubernetes-anywhere')
+        go_path = os.environ.get('GOPATH', '')
+        if go_path:
+            kubeadm_in_gopath = os.path.join(go_path, 'src', 'k8s.io', 'kubernetes-anywhere')
+            if os.path.exists(kubeadm_in_gopath):
+                kubeadm_path = kubeadm_in_gopath
         runner_args.extend([
-            '--kubernetes-anywhere-path=%s' % os.path.join(workspace, 'k8s.io',
-                'kubernetes-anywhere'),
+            '--kubernetes-anywhere-path=%s' % kubeadm_path,
             '--kubernetes-anywhere-phase2-provider=kubeadm',
             '--kubernetes-anywhere-cluster=%s' % cluster,
             '--kubernetes-anywhere-kubeadm-version=%s' % version,
@@ -586,7 +592,7 @@ def main(args):
         set_up_kops_aws(mode.workspace, args, mode, cluster, runner_args)
     elif args.deployment == 'kops' and args.provider == 'gce':
         set_up_kops_gce(mode.workspace, args, mode, cluster, runner_args)
-    elif args.gce_ssh:
+    elif args.deployment != 'kind' and args.gce_ssh:
         mode.add_gce_ssh(args.gce_ssh, args.gce_pub)
 
     # TODO(fejta): delete this?
@@ -690,15 +696,15 @@ def create_parser():
         help='Use --aws-profile to run as --aws-role-arn if set')
     parser.add_argument(
         '--aws-ssh',
-        default=os.environ.get('JENKINS_AWS_SSH_PRIVATE_KEY_FILE'),
+        default=os.environ.get('AWS_SSH_PRIVATE_KEY_FILE'),
         help='Path to private aws ssh keys')
     parser.add_argument(
         '--aws-pub',
-        default=os.environ.get('JENKINS_AWS_SSH_PUBLIC_KEY_FILE'),
+        default=os.environ.get('AWS_SSH_PUBLIC_KEY_FILE'),
         help='Path to pub aws ssh key')
     parser.add_argument(
         '--aws-cred',
-        default=os.environ.get('JENKINS_AWS_CREDENTIALS_FILE'),
+        default=os.environ.get('AWS_SHARED_CREDENTIALS_FILE'),
         help='Path to aws credential file')
     parser.add_argument(
         '--aws-cluster-domain', help='Domain of the aws cluster for aws-pr jobs')

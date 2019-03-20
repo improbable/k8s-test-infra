@@ -31,12 +31,14 @@ import (
 
 	"k8s.io/test-infra/pkg/flagutil"
 	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
 	"k8s.io/test-infra/prow/hook"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/metrics"
 	pluginhelp "k8s.io/test-infra/prow/pluginhelp/hook"
 	"k8s.io/test-infra/prow/plugins"
+	"k8s.io/test-infra/prow/repoowners"
 	"k8s.io/test-infra/prow/slack"
 )
 
@@ -49,7 +51,7 @@ type options struct {
 
 	dryRun      bool
 	gracePeriod time.Duration
-	kubernetes  prowflagutil.KubernetesOptions
+	kubernetes  prowflagutil.ExperimentalKubernetesOptions
 	github      prowflagutil.GitHubOptions
 
 	webhookSecretFile string
@@ -110,7 +112,7 @@ func main() {
 		tokens = append(tokens, o.slackTokenFile)
 	}
 
-	secretAgent := &config.SecretAgent{}
+	secretAgent := &secret.Agent{}
 	if err := secretAgent.Start(tokens); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
 	}
@@ -125,9 +127,14 @@ func main() {
 	}
 	defer gitClient.Clean()
 
-	kubeClient, err := o.kubernetes.Client(configAgent.Config().ProwJobNamespace, o.dryRun)
+	infrastructureClient, err := o.kubernetes.InfrastructureClusterClient(o.dryRun)
 	if err != nil {
-		logrus.WithError(err).Fatal("Error getting Kubernetes client.")
+		logrus.WithError(err).Fatal("Error getting Kubernetes client for infrastructure cluster.")
+	}
+
+	prowJobClient, err := o.kubernetes.ProwJobClient(configAgent.Config().ProwJobNamespace, o.dryRun)
+	if err != nil {
+		logrus.WithError(err).Fatal("Error getting ProwJob client for infrastructure cluster.")
 	}
 
 	var slackClient *slack.Client
@@ -140,16 +147,29 @@ func main() {
 		slackClient = slack.NewFakeClient()
 	}
 
-	clientAgent := &plugins.ClientAgent{
-		GitHubClient: githubClient,
-		KubeClient:   kubeClient,
-		GitClient:    gitClient,
-		SlackClient:  slackClient,
-	}
-
 	pluginAgent := &plugins.ConfigAgent{}
 	if err := pluginAgent.Start(o.pluginConfig); err != nil {
 		logrus.WithError(err).Fatal("Error starting plugins.")
+	}
+
+	mdYAMLEnabled := func(org, repo string) bool {
+		return pluginAgent.Config().MDYAMLEnabled(org, repo)
+	}
+	skipCollaborators := func(org, repo string) bool {
+		return pluginAgent.Config().SkipCollaborators(org, repo)
+	}
+	ownersDirBlacklist := func() config.OwnersDirBlacklist {
+		return configAgent.Config().OwnersDirBlacklist
+	}
+	ownersClient := repoowners.NewClient(gitClient, githubClient, mdYAMLEnabled, skipCollaborators, ownersDirBlacklist)
+
+	clientAgent := &plugins.ClientAgent{
+		GitHubClient:     githubClient,
+		ProwJobClient:    prowJobClient,
+		KubernetesClient: infrastructureClient,
+		GitClient:        gitClient,
+		SlackClient:      slackClient,
+		OwnersClient:     ownersClient,
 	}
 
 	promMetrics := hook.NewMetrics()

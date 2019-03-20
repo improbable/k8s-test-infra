@@ -26,10 +26,10 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"k8s.io/test-infra/prow/config"
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/jenkins"
-	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
 )
 
@@ -120,7 +120,7 @@ func main() {
 		tokens = append(tokens, o.jenkinsBearerTokenFile)
 	}
 
-	secretAgent := &config.SecretAgent{}
+	secretAgent := &secret.Agent{}
 	if err := secretAgent.Start(tokens); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
 	}
@@ -152,15 +152,15 @@ func main() {
 		log.Fatalf("Unable to get information on pull request %s/%s#%d: %v", o.org, o.repo, o.num, err)
 	}
 
-	spec := kube.ProwJobSpec{
-		Type: kube.PresubmitJob,
+	spec := prowapi.ProwJobSpec{
+		Type: prowapi.PresubmitJob,
 		Job:  o.jobName,
-		Refs: &kube.Refs{
+		Refs: &prowapi.Refs{
 			Org:     o.org,
 			Repo:    o.repo,
 			BaseRef: pr.Base.Ref,
 			BaseSHA: pr.Base.SHA,
-			Pulls: []kube.Pull{
+			Pulls: []prowapi.Pull{
 				{
 					Number: pr.Number,
 					Author: pr.User.Login,

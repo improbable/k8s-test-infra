@@ -27,8 +27,6 @@ import (
 
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
-	"k8s.io/test-infra/prow/kube"
-	"k8s.io/test-infra/prow/pjutil"
 )
 
 func TestAddedBlockingPresubmits(t *testing.T) {
@@ -41,10 +39,12 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			name: "no change in blocking presubmits means no added blocking jobs",
 			old: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			new: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {},
 			},
@@ -53,12 +53,15 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			name: "added optional presubmit means no added blocking jobs",
 			old: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			new: `"org/repo":
 - name: old-job
   context: old-context
+  always_run: true
 - name: new-job
   context: new-context
+  always_run: true
   optional: true`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {},
@@ -68,13 +71,33 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			name: "added non-reporting presubmit means no added blocking jobs",
 			old: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			new: `"org/repo":
 - name: old-job
   context: old-context
+  always_run: true
 - name: new-job
   context: new-context
+  always_run: true
   skip_report: true`,
+			expected: map[string][]config.Presubmit{
+				"org/repo": {},
+			},
+		},
+		{
+			name: "added presubmit that needs a manual trigger means no added blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  always_run: true`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  always_run: true
+- name: new-job
+  context: new-context
+  always_run: false`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {},
 			},
@@ -83,18 +106,24 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			name: "added required presubmit means added blocking jobs",
 			old: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			new: `"org/repo":
 - name: old-job
   context: old-context
+  always_run: true
 - name: new-job
-  context: new-context`,
+  context: new-context
+  always_run: true`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {{
-					JobBase:    config.JobBase{Name: "new-job"},
-					Context:    "new-context",
-					Optional:   false,
-					SkipReport: false,
+					JobBase: config.JobBase{Name: "new-job"},
+					Reporter: config.Reporter{
+						Context:    "new-context",
+						SkipReport: false,
+					},
+					AlwaysRun: true,
+					Optional:  false,
 				}},
 			},
 		},
@@ -103,10 +132,12 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			old: `"org/repo":
 - name: old-job
   context: old-context
+  always_run: true
   optional: true`,
 			new: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {},
 			},
@@ -116,14 +147,70 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			old: `"org/repo":
 - name: old-job
   context: old-context
+  always_run: true
   skip_report: true`,
 			new: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {{
-					JobBase: config.JobBase{Name: "old-job"},
-					Context: "old-context",
+					JobBase:   config.JobBase{Name: "old-job"},
+					Reporter:  config.Reporter{Context: "old-context"},
+					AlwaysRun: true,
+				}},
+			},
+		},
+		{
+			name: "required presubmit transitioning run_if_changed means added blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: old-changes`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: new-changes`,
+			expected: map[string][]config.Presubmit{
+				"org/repo": {{
+					JobBase:             config.JobBase{Name: "old-job"},
+					Reporter:            config.Reporter{Context: "old-context"},
+					RegexpChangeMatcher: config.RegexpChangeMatcher{RunIfChanged: "new-changes"},
+				}},
+			},
+		},
+		{
+			name: "optional presubmit transitioning run_if_changed means no added blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: old-changes
+  optional: true`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: new-changes
+  optional: true`,
+			expected: map[string][]config.Presubmit{
+				"org/repo": {},
+			},
+		},
+		{
+			name: "optional presubmit transitioning to required run_if_changed means added blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  always_run: true
+  optional: true`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: changes`,
+			expected: map[string][]config.Presubmit{
+				"org/repo": {{
+					JobBase:             config.JobBase{Name: "old-job"},
+					Reporter:            config.Reporter{Context: "old-context"},
+					RegexpChangeMatcher: config.RegexpChangeMatcher{RunIfChanged: "changes"},
 				}},
 			},
 		},
@@ -131,10 +218,12 @@ func TestAddedBlockingPresubmits(t *testing.T) {
 			name: "required presubmit transitioning to new context means no added blocking jobs",
 			old: `"org/repo":
 - name: old-job
-  context: old-context`,
+  context: old-context
+  always_run: true`,
 			new: `"org/repo":
 - name: old-job
-  context: new-context`,
+  context: new-context
+  always_run: true`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {},
 			},
@@ -205,8 +294,8 @@ func TestRemovedBlockingPresubmits(t *testing.T) {
 			new: `"org/repo": []`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {{
-					JobBase: config.JobBase{Name: "old-job"},
-					Context: "old-context",
+					JobBase:  config.JobBase{Name: "old-job"},
+					Reporter: config.Reporter{Context: "old-context"},
 				}},
 			},
 		},
@@ -244,8 +333,8 @@ func TestRemovedBlockingPresubmits(t *testing.T) {
 			new: `{}`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {{
-					JobBase: config.JobBase{Name: "old-job"},
-					Context: "old-context",
+					JobBase:  config.JobBase{Name: "old-job"},
+					Reporter: config.Reporter{Context: "old-context"},
 				}},
 			},
 		},
@@ -257,6 +346,34 @@ func TestRemovedBlockingPresubmits(t *testing.T) {
 			new: `"org/repo":
 - name: old-job
   context: new-context`,
+			expected: map[string][]config.Presubmit{
+				"org/repo": {},
+			},
+		},
+		{
+			name: "required presubmit transitioning run_if_changed means no removed blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: old-changes`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: new-changes`,
+			expected: map[string][]config.Presubmit{
+				"org/repo": {},
+			},
+		},
+		{
+			name: "optional presubmit transitioning to required run_if_changed means no removed blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  optional: true`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: changes`,
 			expected: map[string][]config.Presubmit{
 				"org/repo": {},
 			},
@@ -376,14 +493,42 @@ func TestMigratedBlockingPresubmits(t *testing.T) {
 			expected: map[string][]presubmitMigration{
 				"org/repo": {{
 					from: config.Presubmit{
-						JobBase: config.JobBase{Name: "old-job"},
-						Context: "old-context",
+						JobBase:  config.JobBase{Name: "old-job"},
+						Reporter: config.Reporter{Context: "old-context"},
 					},
 					to: config.Presubmit{
-						JobBase: config.JobBase{Name: "old-job"},
-						Context: "new-context",
+						JobBase:  config.JobBase{Name: "old-job"},
+						Reporter: config.Reporter{Context: "new-context"},
 					},
 				}},
+			},
+		},
+		{
+			name: "required presubmit transitioning run_if_changed means no removed blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: old-changes`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: new-changes`,
+			expected: map[string][]presubmitMigration{
+				"org/repo": {},
+			},
+		},
+		{
+			name: "optional presubmit transitioning to required run_if_changed means no removed blocking jobs",
+			old: `"org/repo":
+- name: old-job
+  context: old-context
+  optional: true`,
+			new: `"org/repo":
+- name: old-job
+  context: old-context
+  run_if_changed: changes`,
+			expected: map[string][]presubmitMigration{
+				"org/repo": {},
 			},
 		},
 	}
@@ -449,7 +594,7 @@ type fakeMigrator struct {
 	migrated map[orgRepo]migrationSet
 }
 
-func (m *fakeMigrator) retire(org, repo, context string) error {
+func (m *fakeMigrator) retire(org, repo, context string, targetBranchFilter func(string) bool) error {
 	key := orgRepo{org: org, repo: repo}
 	if contexts, exist := m.retireErrors[key]; exist && contexts.Has(context) {
 		return errors.New("failed to retire context")
@@ -462,7 +607,7 @@ func (m *fakeMigrator) retire(org, repo, context string) error {
 	return nil
 }
 
-func (m *fakeMigrator) migrate(org, repo, from, to string) error {
+func (m *fakeMigrator) migrate(org, repo, from, to string, targetBranchFilter func(string) bool) error {
 	key := orgRepo{org: org, repo: repo}
 	item := migration{from: from, to: to}
 	if contexts, exist := m.migrateErrors[key]; exist && contexts.has(item) {
@@ -478,24 +623,38 @@ func (m *fakeMigrator) migrate(org, repo, from, to string) error {
 	return nil
 }
 
-func newfakeKubeClient() fakeKubeClient {
-	return fakeKubeClient{
-		errors:  sets.NewString(),
-		created: []kube.ProwJobSpec{},
+func newfakeProwJobTriggerer() fakeProwJobTriggerer {
+	return fakeProwJobTriggerer{
+		errors:  map[prKey]sets.String{},
+		created: map[prKey]sets.String{},
 	}
 }
 
-type fakeKubeClient struct {
-	errors  sets.String
-	created []kube.ProwJobSpec
+type prKey struct {
+	org, repo string
+	num       int
 }
 
-func (c *fakeKubeClient) CreateProwJob(j kube.ProwJob) (kube.ProwJob, error) {
-	if c.errors.Has(j.Name) {
-		return j, errors.New("failed to create prow job")
+type fakeProwJobTriggerer struct {
+	errors  map[prKey]sets.String
+	created map[prKey]sets.String
+}
+
+func (c *fakeProwJobTriggerer) run(pr *github.PullRequest, requestedJobs []config.Presubmit) error {
+	names := sets.NewString()
+	key := prKey{org: pr.Base.Repo.Owner.Login, repo: pr.Base.Repo.Name, num: pr.Number}
+	for _, job := range requestedJobs {
+		if jobErrors, exists := c.errors[key]; exists && jobErrors.Has(job.Name) {
+			return errors.New("failed to trigger prow job")
+		}
+		names.Insert(job.Name)
 	}
-	c.created = append(c.created, j.Spec)
-	return j, nil
+	if current, exists := c.created[key]; exists {
+		c.created[key] = current.Union(names)
+	} else {
+		c.created[key] = names
+	}
+	return nil
 }
 
 func newFakeGitHubClient(key orgRepo) fakeGitHubClient {
@@ -574,14 +733,18 @@ func TestControllerReconcile(t *testing.T) {
   "org/repo":
   - name: required-job
     context: required-job
+    always_run: true
   - name: other-required-job
-    context: other-required-job`
+    context: other-required-job
+    always_run: true`
 	newConfigData := `presubmits:
   "org/repo":
   - name: other-required-job
     context: new-context
+    always_run: true
   - name: new-required-job
-    context: new-required-context`
+    context: new-required-context
+    always_run: true`
 
 	var oldConfig, newConfig config.Config
 	if err := yaml.Unmarshal([]byte(oldConfigData), &oldConfig); err != nil {
@@ -590,13 +753,14 @@ func TestControllerReconcile(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(newConfigData), &newConfig); err != nil {
 		t.Fatalf("could not unmarshal new config: %v", err)
 	}
-	delta := config.ConfigDelta{Before: oldConfig, After: newConfig}
+	delta := config.Delta{Before: oldConfig, After: newConfig}
 	migrate := migration{from: "other-required-job", to: "new-context"}
 	org, repo := "org", "repo"
 	orgRepoKey := orgRepo{org: org, repo: repo}
 	prNumber := 1
 	author := "user"
 	prAuthorKey := prAuthor{author: author, pr: prNumber}
+	prOrgRepoKey := prKey{org: org, repo: repo, num: prNumber}
 	baseRef := "base"
 	baseSha := "abc"
 	pr := github.PullRequest{
@@ -627,7 +791,7 @@ func TestControllerReconcile(t *testing.T) {
 		{
 			name: "no errors and trusted PR means we should see a trigger, retire and migrate",
 			generator: func() (Controller, func(*testing.T)) {
-				fkc := newfakeKubeClient()
+				fpjt := newfakeProwJobTriggerer()
 				fghc := newFakeGitHubClient(orgRepoKey)
 				fghc.prs[orgRepoKey] = []github.PullRequest{pr}
 				fghc.refs[orgRepoKey]["heads/"+pr.Base.Ref] = baseSha
@@ -635,13 +799,10 @@ func TestControllerReconcile(t *testing.T) {
 				ftc := newFakeTrustedChecker(orgRepoKey)
 				ftc.trusted[orgRepoKey][prAuthorKey] = true
 				return Controller{
-						continueOnError: true, kubeClient: &fkc, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
+						continueOnError: true, prowJobTriggerer: &fpjt, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
 					}, func(t *testing.T) {
-						expectedProwJob := pjutil.NewPresubmit(pr, baseSha, config.Presubmit{
-							JobBase: config.JobBase{Name: "new-required-job"},
-							Context: "new-required-context",
-						}, "none").Spec
-						if actual, expected := fkc.created, []kube.ProwJobSpec{expectedProwJob}; !reflect.DeepEqual(actual, expected) {
+						expectedProwJob := map[prKey]sets.String{prOrgRepoKey: sets.NewString("new-required-job")}
+						if actual, expected := fpjt.created, expectedProwJob; !reflect.DeepEqual(actual, expected) {
 							t.Errorf("did not create expected ProwJob: %s", diff.ObjectReflectDiff(actual, expected))
 						}
 						if actual, expected := fsm.retired, map[orgRepo]sets.String{orgRepoKey: sets.NewString("required-job")}; !reflect.DeepEqual(actual, expected) {
@@ -656,7 +817,7 @@ func TestControllerReconcile(t *testing.T) {
 		{
 			name: "no errors and untrusted PR means we should see no trigger, a retire and a migrate",
 			generator: func() (Controller, func(*testing.T)) {
-				fkc := newfakeKubeClient()
+				fpjt := newfakeProwJobTriggerer()
 				fghc := newFakeGitHubClient(orgRepoKey)
 				fghc.prs[orgRepoKey] = []github.PullRequest{pr}
 				fghc.refs[orgRepoKey]["heads/"+pr.Base.Ref] = baseSha
@@ -664,9 +825,9 @@ func TestControllerReconcile(t *testing.T) {
 				ftc := newFakeTrustedChecker(orgRepoKey)
 				ftc.trusted[orgRepoKey][prAuthorKey] = false
 				return Controller{
-						continueOnError: true, kubeClient: &fkc, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
+						continueOnError: true, prowJobTriggerer: &fpjt, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
 					}, func(t *testing.T) {
-						if actual, expected := fkc.created, []kube.ProwJobSpec{}; !reflect.DeepEqual(actual, expected) {
+						if actual, expected := fpjt.created, map[prKey]sets.String{}; !reflect.DeepEqual(actual, expected) {
 							t.Errorf("did not create expected ProwJob: %s", diff.ObjectReflectDiff(actual, expected))
 						}
 						if actual, expected := fsm.retired, map[orgRepo]sets.String{orgRepoKey: sets.NewString("required-job")}; !reflect.DeepEqual(actual, expected) {
@@ -681,7 +842,7 @@ func TestControllerReconcile(t *testing.T) {
 		{
 			name: "trust check error means we should see no trigger, a retire and a migrate",
 			generator: func() (Controller, func(*testing.T)) {
-				fkc := newfakeKubeClient()
+				fpjt := newfakeProwJobTriggerer()
 				fghc := newFakeGitHubClient(orgRepoKey)
 				fghc.prs[orgRepoKey] = []github.PullRequest{pr}
 				fghc.refs[orgRepoKey]["heads/"+pr.Base.Ref] = baseSha
@@ -689,9 +850,36 @@ func TestControllerReconcile(t *testing.T) {
 				ftc := newFakeTrustedChecker(orgRepoKey)
 				ftc.errors = map[orgRepo]prAuthorSet{orgRepoKey: {prAuthorKey: nil}}
 				return Controller{
-						continueOnError: true, kubeClient: &fkc, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
+						continueOnError: true, prowJobTriggerer: &fpjt, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
 					}, func(t *testing.T) {
-						if actual, expected := fkc.created, []kube.ProwJobSpec{}; !reflect.DeepEqual(actual, expected) {
+						if actual, expected := fpjt.created, map[prKey]sets.String{}; !reflect.DeepEqual(actual, expected) {
+							t.Errorf("did not create expected ProwJob: %s", diff.ObjectReflectDiff(actual, expected))
+						}
+						if actual, expected := fsm.retired, map[orgRepo]sets.String{orgRepoKey: sets.NewString("required-job")}; !reflect.DeepEqual(actual, expected) {
+							t.Errorf("did not retire correct statuses: %s", diff.ObjectReflectDiff(actual, expected))
+						}
+						if actual, expected := fsm.migrated, map[orgRepo]migrationSet{orgRepoKey: {migrate: nil}}; !reflect.DeepEqual(actual, expected) {
+							t.Errorf("did not migrate correct statuses: %s", diff.ObjectReflectDiff(actual, expected))
+						}
+					}
+			},
+			expectErr: true,
+		},
+		{
+			name: "trigger error means we should see no trigger, a retire and a migrate",
+			generator: func() (Controller, func(*testing.T)) {
+				fpjt := newfakeProwJobTriggerer()
+				fpjt.errors[prOrgRepoKey] = sets.NewString("new-required-job")
+				fghc := newFakeGitHubClient(orgRepoKey)
+				fghc.prs[orgRepoKey] = []github.PullRequest{pr}
+				fghc.refs[orgRepoKey]["heads/"+pr.Base.Ref] = baseSha
+				fsm := newFakeMigrator(orgRepoKey)
+				ftc := newFakeTrustedChecker(orgRepoKey)
+				ftc.errors = map[orgRepo]prAuthorSet{orgRepoKey: {prAuthorKey: nil}}
+				return Controller{
+						continueOnError: true, prowJobTriggerer: &fpjt, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
+					}, func(t *testing.T) {
+						if actual, expected := fpjt.created, map[prKey]sets.String{}; !reflect.DeepEqual(actual, expected) {
 							t.Errorf("did not create expected ProwJob: %s", diff.ObjectReflectDiff(actual, expected))
 						}
 						if actual, expected := fsm.retired, map[orgRepo]sets.String{orgRepoKey: sets.NewString("required-job")}; !reflect.DeepEqual(actual, expected) {
@@ -707,7 +895,7 @@ func TestControllerReconcile(t *testing.T) {
 		{
 			name: "retire errors and trusted PR means we should see a trigger and migrate",
 			generator: func() (Controller, func(*testing.T)) {
-				fkc := newfakeKubeClient()
+				fpjt := newfakeProwJobTriggerer()
 				fghc := newFakeGitHubClient(orgRepoKey)
 				fghc.prs[orgRepoKey] = []github.PullRequest{pr}
 				fghc.refs[orgRepoKey]["heads/"+pr.Base.Ref] = baseSha
@@ -716,13 +904,10 @@ func TestControllerReconcile(t *testing.T) {
 				ftc := newFakeTrustedChecker(orgRepoKey)
 				ftc.trusted[orgRepoKey][prAuthorKey] = true
 				return Controller{
-						continueOnError: true, kubeClient: &fkc, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
+						continueOnError: true, prowJobTriggerer: &fpjt, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
 					}, func(t *testing.T) {
-						expectedProwJob := pjutil.NewPresubmit(pr, baseSha, config.Presubmit{
-							JobBase: config.JobBase{Name: "new-required-job"},
-							Context: "new-required-context",
-						}, "none").Spec
-						if actual, expected := fkc.created, []kube.ProwJobSpec{expectedProwJob}; !reflect.DeepEqual(actual, expected) {
+						expectedProwJob := map[prKey]sets.String{prOrgRepoKey: sets.NewString("new-required-job")}
+						if actual, expected := fpjt.created, expectedProwJob; !reflect.DeepEqual(actual, expected) {
 							t.Errorf("did not create expected ProwJob: %s", diff.ObjectReflectDiff(actual, expected))
 						}
 						if actual, expected := fsm.retired, map[orgRepo]sets.String{orgRepoKey: sets.NewString()}; !reflect.DeepEqual(actual, expected) {
@@ -738,7 +923,7 @@ func TestControllerReconcile(t *testing.T) {
 		{
 			name: "migrate errors and trusted PR means we should see a trigger and retire",
 			generator: func() (Controller, func(*testing.T)) {
-				fkc := newfakeKubeClient()
+				fpjt := newfakeProwJobTriggerer()
 				fghc := newFakeGitHubClient(orgRepoKey)
 				fghc.prs[orgRepoKey] = []github.PullRequest{pr}
 				fghc.refs[orgRepoKey]["heads/"+pr.Base.Ref] = baseSha
@@ -747,13 +932,10 @@ func TestControllerReconcile(t *testing.T) {
 				ftc := newFakeTrustedChecker(orgRepoKey)
 				ftc.trusted[orgRepoKey][prAuthorKey] = true
 				return Controller{
-						continueOnError: true, kubeClient: &fkc, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
+						continueOnError: true, prowJobTriggerer: &fpjt, githubClient: &fghc, statusMigrator: &fsm, trustedChecker: &ftc,
 					}, func(t *testing.T) {
-						expectedProwJob := pjutil.NewPresubmit(pr, baseSha, config.Presubmit{
-							JobBase: config.JobBase{Name: "new-required-job"},
-							Context: "new-required-context",
-						}, "none").Spec
-						if actual, expected := fkc.created, []kube.ProwJobSpec{expectedProwJob}; !reflect.DeepEqual(actual, expected) {
+						expectedProwJob := map[prKey]sets.String{prOrgRepoKey: sets.NewString("new-required-job")}
+						if actual, expected := fpjt.created, expectedProwJob; !reflect.DeepEqual(actual, expected) {
 							t.Errorf("did not create expected ProwJob: %s", diff.ObjectReflectDiff(actual, expected))
 						}
 						if actual, expected := fsm.retired, map[orgRepo]sets.String{orgRepoKey: sets.NewString("required-job")}; !reflect.DeepEqual(actual, expected) {

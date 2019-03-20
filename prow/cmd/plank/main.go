@@ -28,9 +28,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/test-infra/prow/pjutil"
 
 	"k8s.io/test-infra/pkg/flagutil"
 	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/logrusutil"
@@ -97,12 +99,15 @@ func main() {
 		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "plank"}),
 	)
 
+	pjutil.ServePProf()
+
 	configAgent := &config.Agent{}
 	if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
 		logrus.WithError(err).Fatal("Error starting config agent.")
 	}
+	cfg := configAgent.Config
 
-	secretAgent := &config.SecretAgent{}
+	secretAgent := &secret.Agent{}
 	if o.github.TokenPath != "" {
 		if err := secretAgent.Start([]string{o.github.TokenPath}); err != nil {
 			logrus.WithError(err).Fatal("Error starting secrets agent.")
@@ -114,7 +119,7 @@ func main() {
 		logrus.WithError(err).Fatal("Error getting GitHub client.")
 	}
 
-	kubeClient, err := o.kubernetes.Client(configAgent.Config().ProwJobNamespace, o.dryRun)
+	kubeClient, err := o.kubernetes.Client(cfg().ProwJobNamespace, o.dryRun)
 	if err != nil {
 		logrus.WithError(err).Fatal("Error getting kube client.")
 	}
@@ -124,26 +129,26 @@ func main() {
 		pkcs = map[string]*kube.Client{kube.DefaultClusterAlias: kubeClient}
 	} else {
 		if o.buildCluster == "" {
-			pkc, err := kube.NewClientInCluster(configAgent.Config().PodNamespace)
+			pkc, err := kube.NewClientInCluster(cfg().PodNamespace)
 			if err != nil {
 				logrus.WithError(err).Fatal("Error getting kube client.")
 			}
 			pkcs = map[string]*kube.Client{kube.DefaultClusterAlias: pkc}
 		} else {
-			pkcs, err = kube.ClientMapFromFile(o.buildCluster, configAgent.Config().PodNamespace)
+			pkcs, err = kube.ClientMapFromFile(o.buildCluster, cfg().PodNamespace)
 			if err != nil {
 				logrus.WithError(err).Fatal("Error getting kube client to build cluster.")
 			}
 		}
 	}
 
-	c, err := plank.NewController(kubeClient, pkcs, githubClient, nil, configAgent, o.totURL, o.selector, o.skipReport)
+	c, err := plank.NewController(kubeClient, pkcs, githubClient, nil, cfg, o.totURL, o.selector, o.skipReport)
 	if err != nil {
 		logrus.WithError(err).Fatal("Error creating plank controller.")
 	}
 
 	// Push metrics to the configured prometheus pushgateway endpoint.
-	pushGateway := configAgent.Config().PushGateway
+	pushGateway := cfg().PushGateway
 	if pushGateway.Endpoint != "" {
 		go metrics.PushMetrics("plank", pushGateway.Endpoint, pushGateway.Interval)
 	}

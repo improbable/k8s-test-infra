@@ -48,7 +48,7 @@ def make_signature(body):
     return 'sha1=' + hmac_instance.hexdigest()
 
 
-class GithubHandler(webapp2.RequestHandler):
+class GitHubHandler(webapp2.RequestHandler):
     """
     Handle POSTs delivered using GitHub's webhook interface. Posts are
     authenticated with HMAC signatures and a shared secret.
@@ -57,7 +57,7 @@ class GithubHandler(webapp2.RequestHandler):
     processing.
     """
     def post(self):
-        event = self.request.headers.get('x-github-event')
+        event = self.request.headers.get('x-github-event', '')
         signature = self.request.headers.get('x-hub-signature', '')
         body = self.request.body
 
@@ -76,7 +76,7 @@ class GithubHandler(webapp2.RequestHandler):
 
         parent = None
         if number:
-            parent = models.GithubResource.make_key(repo, number)
+            parent = models.GitHubResource.make_key(repo, number)
 
         kwargs = {}
         timestamp = self.request.headers.get('x-timestamp')
@@ -84,9 +84,15 @@ class GithubHandler(webapp2.RequestHandler):
             kwargs['timestamp'] = datetime.datetime.strptime(
                 timestamp, '%Y-%m-%d %H:%M:%S.%f')
 
-        webhook = models.GithubWebhookRaw(
+        webhook = models.GitHubWebhookRaw(
             parent=parent,
-            repo=repo, number=number, event=event, body=body, **kwargs)
+            repo=repo,
+            number=number,
+            event=event,
+            guid=self.request.headers.get('x-github-delivery', ''),
+            body=body,
+            **kwargs
+        )
         webhook.put()
 
         # Defer digest updates, so they'll retry on failure.
@@ -130,16 +136,18 @@ class Events(BaseHandler):
         number = int(self.request.get('number', 0)) or None
         count = int(self.request.get('count', 500))
         if repo is not None and number is not None:
-            q = models.GithubWebhookRaw.query(
-                models.GithubWebhookRaw.repo == repo,
-                models.GithubWebhookRaw.number == number)
+            q = models.GitHubWebhookRaw.query(
+                models.GitHubWebhookRaw.repo == repo,
+                models.GitHubWebhookRaw.number == number)
         else:
-            q = models.GithubWebhookRaw.query()
-        q = q.order(models.GithubWebhookRaw.timestamp)
+            q = models.GitHubWebhookRaw.query()
+        q = q.order(models.GitHubWebhookRaw.timestamp)
         events, next_cursor, more = q.fetch_page(count, start_cursor=cursor)
         out = []
         for event in events:
-            out.append({'repo': event.repo, 'event': event.event,
+            out.append({'repo': event.repo,
+                        'event': event.event,
+                        'guid': event.guid,
                         'timestamp': str(event.timestamp),
                         'body': json.loads(event.body)})
         resp = {'next': more and next_cursor.urlsafe(), 'calls': out}
@@ -181,9 +189,9 @@ class Timeline(BaseHandler):
             self.response.write('<pre>%s</pre>' % traceback.format_exc())
 
     def emit_events(self, repo, number):
-        ancestor = models.GithubResource.make_key(repo, number)
-        events = list(models.GithubWebhookRaw.query(ancestor=ancestor)
-            .order(models.GithubWebhookRaw.timestamp))
+        ancestor = models.GitHubResource.make_key(repo, number)
+        events = list(models.GitHubWebhookRaw.query(ancestor=ancestor)
+            .order(models.GitHubWebhookRaw.timestamp))
 
         self.response.write('<h3>Distilled Events</h3>')
         self.response.write('<pre>')
@@ -207,16 +215,21 @@ class Timeline(BaseHandler):
             action = body_json.get('action')
             sender = body_json.get('sender', {}).get('login')
             self.response.write('<tr><td>%s\n' % '<td>'.join(str(x) for x in
-                [event.timestamp, event.event, action, sender,
-                 '<pre>' + cgi.escape(body)]))
+                [   # Table columns
+                    event.timestamp,
+                    '%s<br><code>%s</code>' % (event.event, event.guid),
+                    action,
+                    sender,
+                    '<pre>' + cgi.escape(body)
+                ]))
         return merged
 
     def get(self):
         repo = self.request.get('repo')
         number = self.request.get('number')
         if self.request.get('format') == 'json':
-            ancestor = models.GithubResource.make_key(repo, number)
-            events = list(models.GithubWebhookRaw.query(ancestor=ancestor))
+            ancestor = models.GitHubResource.make_key(repo, number)
+            events = list(models.GitHubWebhookRaw.query(ancestor=ancestor))
             self.response.headers['content-type'] = 'application/json'
             self.response.write(json.dumps([e.body for e in events], indent=True))
             return

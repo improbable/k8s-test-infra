@@ -27,13 +27,15 @@ import (
 
 // KubernetesOptions holds options for interacting with Kubernetes.
 type KubernetesOptions struct {
-	cluster string
-	deckURI string
+	cluster    string
+	kubeconfig string
+	deckURI    string
 }
 
 // AddFlags injects Kubernetes options into the given FlagSet.
 func (o *KubernetesOptions) AddFlags(fs *flag.FlagSet) {
 	fs.StringVar(&o.cluster, "cluster", "", "Path to kube.Cluster YAML file. If empty, uses the local cluster.")
+	fs.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to .kube/config file. If empty, uses the local cluster.")
 	fs.StringVar(&o.deckURI, "deck-url", "", "Deck URI for read-only access to the cluster.")
 }
 
@@ -52,18 +54,19 @@ func (o *KubernetesOptions) Validate(dryRun bool) error {
 	return nil
 }
 
+// InjectBuildCluster is needed for backwards compatibility for Deck. Remove later.
+func (o *KubernetesOptions) InjectBuildCluster(buildCluster string) {
+	o.cluster = buildCluster
+}
+
 // Client returns a Kubernetes client.
-func (o *KubernetesOptions) Client(namespace string, dryRun bool) (client *kube.Client, err error) {
+func (o *KubernetesOptions) Client(namespace string, dryRun bool) (*kube.Client, error) {
 	if dryRun {
 		return kube.NewFakeClient(o.deckURI), nil
 	}
 
 	if o.cluster == "" {
-		client, err = kube.NewClientInCluster(namespace)
-		if err != nil {
-			return nil, err
-		}
-		return client, nil
+		return kube.NewClientInCluster(namespace)
 	}
 
 	return kube.NewClientFromFile(o.cluster, namespace)

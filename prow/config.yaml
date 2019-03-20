@@ -1,16 +1,16 @@
 plank:
-  job_url_template: '{{if .Spec.Refs}}{{if eq .Spec.Refs.Org "kubernetes-security"}}https://console.cloud.google.com/storage/browser/kubernetes-security-prow/{{else}}https://gubernator.k8s.io/build/kubernetes-jenkins/{{end}}{{else}}https://gubernator.k8s.io/build/kubernetes-jenkins/{{end}}{{if eq .Spec.Type "presubmit"}}pr-logs/pull{{else if eq .Spec.Type "batch"}}pr-logs/pull{{else}}logs{{end}}{{if .Spec.Refs}}{{if ne .Spec.Refs.Org ""}}{{if ne .Spec.Refs.Org "kubernetes"}}/{{if and (eq .Spec.Refs.Org "kubernetes-sigs") (ne .Spec.Refs.Repo "poseidon")}}sigs.k8s.io{{else}}{{.Spec.Refs.Org}}{{end}}_{{.Spec.Refs.Repo}}{{else if ne .Spec.Refs.Repo "kubernetes"}}/{{.Spec.Refs.Repo}}{{end}}{{end}}{{end}}{{if eq .Spec.Type "presubmit"}}/{{with index .Spec.Refs.Pulls 0}}{{.Number}}{{end}}{{else if eq .Spec.Type "batch"}}/batch{{end}}/{{.Spec.Job}}/{{.Status.BuildID}}/'
-  report_template: '[Full PR test history](https://gubernator.k8s.io/pr/{{if eq .Spec.Refs.Org "kubernetes"}}{{if eq .Spec.Refs.Repo "kubernetes"}}{{else}}{{.Spec.Refs.Repo}}/{{end}}{{else}}{{.Spec.Refs.Org}}_{{.Spec.Refs.Repo}}/{{end}}{{with index .Spec.Refs.Pulls 0}}{{.Number}}{{end}}). [Your PR dashboard](https://gubernator.k8s.io/pr/{{with index .Spec.Refs.Pulls 0}}{{.Author}}{{end}}). Please help us cut down on flakes by [linking to](https://git.k8s.io/community/contributors/devel/flaky-tests.md#filing-issues-for-flaky-tests) an [open issue](https://github.com/{{.Spec.Refs.Org}}/{{.Spec.Refs.Repo}}/issues?q=is:issue+is:open) when you hit one in your PR.'
-  job_url_prefix: https://gubernator.k8s.io/build/
+  job_url_template: '{{if .Spec.Refs}}{{if eq .Spec.Refs.Org "kubernetes-security"}}https://console.cloud.google.com/storage/browser/kubernetes-security-prow/{{else}}https://prow.k8s.io/view/gcs/kubernetes-jenkins/{{end}}{{else}}https://prow.k8s.io/view/gcs/kubernetes-jenkins/{{end}}{{if eq .Spec.Type "presubmit"}}pr-logs/pull{{else if eq .Spec.Type "batch"}}pr-logs/pull{{else}}logs{{end}}{{if .Spec.Refs}}{{if ne .Spec.Refs.Org ""}}{{if ne .Spec.Refs.Org "kubernetes"}}/{{if and (eq .Spec.Refs.Org "kubernetes-sigs") (ne .Spec.Refs.Repo "poseidon")}}sigs.k8s.io{{else}}{{.Spec.Refs.Org}}{{end}}_{{.Spec.Refs.Repo}}{{else if ne .Spec.Refs.Repo "kubernetes"}}/{{.Spec.Refs.Repo}}{{end}}{{end}}{{end}}{{if eq .Spec.Type "presubmit"}}/{{with index .Spec.Refs.Pulls 0}}{{.Number}}{{end}}{{else if eq .Spec.Type "batch"}}/batch{{end}}/{{.Spec.Job}}/{{.Status.BuildID}}/'
+  report_template: '[Full PR test history](https://prow.k8s.io/pr-history?org={{.Spec.Refs.Org}}&repo={{.Spec.Refs.Repo}}&pr={{with index .Spec.Refs.Pulls 0}}{{.Number}}{{end}}). [Your PR dashboard](https://gubernator.k8s.io/pr/{{with index .Spec.Refs.Pulls 0}}{{.Author}}{{end}}). Please help us cut down on flakes by [linking to](https://git.k8s.io/community/contributors/devel/flaky-tests.md#filing-issues-for-flaky-tests) an [open issue](https://github.com/{{.Spec.Refs.Org}}/{{.Spec.Refs.Repo}}/issues?q=is:issue+is:open) when you hit one in your PR.'
+  job_url_prefix: https://prow.k8s.io/view/gcs/
   pod_pending_timeout: 60m
   default_decoration_config:
     timeout: 7200000000000 # 2h
     grace_period: 15000000000 # 15s
     utility_images:
-      clonerefs: "gcr.io/k8s-prow/clonerefs:v20181204-6f73ef6"
-      initupload: "gcr.io/k8s-prow/initupload:v20181204-6f73ef6"
-      entrypoint: "gcr.io/k8s-prow/entrypoint:v20181204-6f73ef6"
-      sidecar: "gcr.io/k8s-prow/sidecar:v20181204-6f73ef6"
+      clonerefs: "gcr.io/k8s-prow/clonerefs:v20190314-e8134a3"
+      initupload: "gcr.io/k8s-prow/initupload:v20190314-e8134a3"
+      entrypoint: "gcr.io/k8s-prow/entrypoint:v20190314-e8134a3"
+      sidecar: "gcr.io/k8s-prow/sidecar:v20190314-e8134a3"
     gcs_configuration:
       bucket: "kubernetes-jenkins"
       path_strategy: "legacy"
@@ -26,14 +26,17 @@ sinker:
 deck:
   spyglass:
     size_limit: 500000000 # 500MB
+    gcs_browser_prefix: https://gcsweb.k8s.io/gcs/
+    testgrid_config: gs://k8s-testgrid/config
+    testgrid_root: https://testgrid.k8s.io/
     viewers:
-      # TODO(Katharine, #10274): These names are deprecated, rename after deploy.
       "started.json|finished.json":
-      - "metadata-viewer"
+      - "metadata"
       "build-log.txt":
-      - "build-log-viewer"
+      - "buildlog"
       "artifacts/junit.*\\.xml":
-      - "junit-viewer"
+      - "junit"
+    announcement: "The old job viewer, Gubernator, has been deprecated in favour of this page, Spyglass.{{if .ArtifactPath}} For now, the old page is <a href='https://gubernator.k8s.io/build/{{.ArtifactPath}}'>still available</a>.{{end}} Please send feedback to sig-testing."
   tide_update_period: 1s
   hidden_repos:
   - kubernetes-security
@@ -96,7 +99,20 @@ branch-protection:
             users: []
             teams:
             - stage-bots
+        component-base:
+          restrictions:
+            users: []
+            teams:
+            - stage-bots
+        csi-translation-lib:
+          restrictions:
+            users: []
+            teams:
+            - stage-bots
         dashboard:
+          required_status_checks:
+            contexts:
+            - continuous-integration/travis-ci/pr
           required_pull_request_reviews:
             required_approving_review_count: 1
         dns:
@@ -303,6 +319,7 @@ branch-protection:
             - continuous-integration/travis-ci
 
 tide:
+  sync_period: 2m
   queries:
   - orgs:
     - kubeflow
@@ -331,56 +348,39 @@ tide:
     - do-not-merge/work-in-progress
     - needs-rebase
   - orgs:
+    - kubernetes
     - kubernetes-client
     - kubernetes-csi
     - kubernetes-incubator
     - kubernetes-sigs
     repos:
     - client-go/unofficial-docs
-    - kubernetes/autoscaler
-    - kubernetes/client-go
-    - kubernetes/cloud-provider-aws
-    - kubernetes/cloud-provider-alibaba-cloud
-    - kubernetes/cloud-provider-azure
-    - kubernetes/cloud-provider-gcp
-    - kubernetes/cloud-provider-openstack
-    - kubernetes/cloud-provider-vsphere
-    - kubernetes/cluster-registry
-    - kubernetes/community
-    - kubernetes/contrib
-    - kubernetes/dashboard
-    - kubernetes/dns
-    - kubernetes/enhancements
-    - kubernetes/examples
-    - kubernetes/federation
-    - kubernetes/frakti
-    - kubernetes/gengo
-    - kubernetes/git-sync
-    - kubernetes/ingress-gce
-    - kubernetes/ingress-nginx
-    - kubernetes/k8s.io
-    - kubernetes/klog
-    - kubernetes/komposer
-    - kubernetes/kops
-    - kubernetes/kube-deploy
-    - kubernetes/kube-openapi
-    - kubernetes/kube-state-metrics
-    - kubernetes/kubeadm
-    - kubernetes/kubectl
-    - kubernetes/kubernetes-anywhere
-    - kubernetes/kubernetes-template-project
-    - kubernetes/minikube
-    - kubernetes/node-problem-detector
-    - kubernetes/org
-    - kubernetes/perf-tests
-    - kubernetes/publishing-bot
-    - kubernetes/release
-    - kubernetes/repo-infra
-    - kubernetes/sig-release
-    - kubernetes/steering
-    - kubernetes/test-infra
-    - kubernetes/utils
-    - kubernetes/website
+    excludedRepos:
+    - kubernetes/kubernetes # Handled with a separate Tide query below.
+    # The following are staging repos which do not normally support merging PRs.
+    # https://github.com/kubernetes/kubernetes/blob/master/staging/README.md
+    # Note that k/client-go is an exception to this rule so it is not an excludedRepo.
+    - kubernetes/api
+    - kubernetes/apiextensions-apiserver
+    - kubernetes/apimachinery
+    - kubernetes/apiserver
+    - kubernetes/cli-runtime
+    - kubernetes/cloud-provider
+    - kubernetes/cluster-bootstrap
+    - kubernetes/code-generator
+    - kubernetes/component-base
+    - kubernetes/csi-api
+    - kubernetes/csi-translation-lib
+    - kubernetes/kube-aggregator
+    - kubernetes/kube-controller-manager
+    - kubernetes/kube-proxy
+    - kubernetes/kube-scheduler
+    - kubernetes/kubelet
+    - kubernetes/metrics
+    - kubernetes/node-api
+    - kubernetes/sample-apiserver
+    - kubernetes/sample-cli-plugin
+    - kubernetes/sample-controller
     labels:
     - lgtm
     - approved
@@ -411,19 +411,33 @@ tide:
     - needs-kind
     - needs-rebase
     - needs-sig
+  - repos:
+    -  GoogleCloudPlatform/netd
+    labels:
+    - lgtm
+    - approved
+    missingLabels:
+    - do-not-merge
+    - do-not-merge/blocked-paths
+    - do-not-merge/hold
+    - do-not-merge/invalid-owners-file
+    - do-not-merge/work-in-progress
+
   merge_method:
     helm/charts: squash
     kubeflow: squash
     kubernetes-client/csharp: squash
     kubernetes-client/gen: squash
     kubernetes-incubator/service-catalog: squash
+    kubernetes-sigs/cluster-api: squash
     kubernetes-sigs/cluster-api-provider-aws: squash
+    kubernetes-sigs/cluster-api-provider-azure: squash
     kubernetes-sigs/cluster-api-provider-digitalocean: squash
     kubernetes-sigs/cluster-api-provider-gcp: squash
     kubernetes-sigs/cluster-api-provider-openstack: squash
     kubernetes-sigs/cluster-api-provider-vsphere: squash
-    kubernetes-sigs/cluster-api: squash
     kubernetes-sigs/kubespray: squash
+    kubernetes/cloud-provider-openstack: squash
     kubernetes/dashboard: squash
     kubernetes/kube-deploy: squash
     kubernetes/website: squash
@@ -433,10 +447,20 @@ tide:
   context_options:
     optional-contexts:
     - "Submit Queue"
+    orgs:
+     kubernetes:
+      repos:
+        dashboard:
+          skip-unknown-contexts: true
+          from-branch-protection: true
 
 push_gateway:
   endpoint: pushgateway
 
+github_reporter: 
+  job_types_to_report:
+  - presubmit
+  - postsubmit
 
 presets:
 # credential presets
@@ -514,9 +538,9 @@ presets:
   env:
   - name: USER
     value: prow
-  - name: JENKINS_AWS_SSH_PRIVATE_KEY_FILE
+  - name: AWS_SSH_PRIVATE_KEY_FILE
     value: /etc/aws-ssh/aws-ssh-private
-  - name: JENKINS_AWS_SSH_PUBLIC_KEY_FILE
+  - name: AWS_SSH_PUBLIC_KEY_FILE
     value: /etc/aws-ssh/aws-ssh-public
   volumes:
   - name: aws-ssh
@@ -526,20 +550,6 @@ presets:
   volumeMounts:
   - name: aws-ssh
     mountPath: /etc/aws-ssh
-    readOnly: true
-- labels:
-    preset-aws-credential: "true"
-  env:
-  - name: JENKINS_AWS_CREDENTIALS_FILE
-    value: /etc/aws-cred/credentials
-  volumes:
-  - name: aws-cred
-    secret:
-      defaultMode: 0400
-      secretName: aws-cred-new
-  volumeMounts:
-  - name: aws-cred
-    mountPath: /etc/aws-cred
     readOnly: true
 # storage / caching presets
 - labels:
@@ -589,3 +599,21 @@ presets:
   volumeMounts:
   - name: docker-graph
     mountPath: /docker-graph
+# volume mounts for kind
+- labels:
+    preset-kind-volume-mounts: "true"
+  volumeMounts:
+    - mountPath: /lib/modules
+      name: modules
+      readOnly: true
+    - mountPath: /sys/fs/cgroup
+      name: cgroup
+  volumes:
+    - name: modules
+      hostPath:
+        path: /lib/modules
+        type: Directory
+    - name: cgroup
+      hostPath:
+        path: /sys/fs/cgroup
+        type: Directory

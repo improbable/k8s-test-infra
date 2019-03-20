@@ -1,13 +1,15 @@
+# See the OWNERS docs at https://go.k8s.io/owners
+
 approvers:
-- amwat
-- BenTheElder
-- cjwagner
-- fejta
-- ixdy
-- krzyzacy
-- michelle192837
-- mithrav
-- rmmh
-- shyamjvs
-- spiffxp
-- stevekuznetsov
+- amwat # oncall
+# - BenTheElder # emeritus
+- cjwagner # oncall
+- fejta # lead
+- ixdy # oncall
+- Katharine # oncall
+- krzyzacy # oncall
+- spiffxp # lead
+- stevekuznetsov # lead
+
+labels:
+- sig/testing

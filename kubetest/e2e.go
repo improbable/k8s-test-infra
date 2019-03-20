@@ -48,15 +48,21 @@ func argFields(args, dump, ipRange string) []string {
 }
 
 func run(deploy deployer, o options) error {
-	if o.checkSkew {
-		os.Setenv("KUBECTL", "./cluster/kubectl.sh --match-server-version")
-	} else {
-		os.Setenv("KUBECTL", "./cluster/kubectl.sh")
+	cmd, err := deploy.KubectlCommand()
+	if err != nil {
+		return err
 	}
+	if cmd == nil {
+		cmd = exec.Command("./cluster/kubectl.sh")
+	}
+	if o.checkSkew {
+		cmd.Args = append(cmd.Args, "--match-server-version")
+	}
+	os.Setenv("KUBECTL", strings.Join(cmd.Args, " "))
+
 	os.Setenv("KUBE_CONFIG_FILE", "config-test.sh")
 	os.Setenv("KUBE_RUNTIME_CONFIG", o.runtimeConfig)
 
-	var err error
 	var errs []error
 
 	dump, err := util.OptionalAbsPath(o.dump)
@@ -70,11 +76,6 @@ func run(deploy deployer, o options) error {
 	}
 
 	if o.up {
-		if o.federation {
-			if err := control.XMLWrap(&suite, "Federation TearDown Previous", fedDown); err != nil {
-				return fmt.Errorf("error tearing down previous federation control plane: %v", err)
-			}
-		}
 		if err := control.XMLWrap(&suite, "TearDown Previous", deploy.Down); err != nil {
 			return fmt.Errorf("error tearing down previous cluster: %s", err)
 		}
@@ -82,8 +83,7 @@ func run(deploy deployer, o options) error {
 
 	// Ensures that the cleanup/down action is performed exactly once.
 	var (
-		downDone           = false
-		federationDownDone = false
+		downDone = false
 	)
 
 	var (
@@ -110,17 +110,6 @@ func run(deploy deployer, o options) error {
 				}
 				return nil
 			})
-			// Deferred statements are executed in last-in-first-out order, so
-			// federation down defer must appear after the cluster teardown in
-			// order to execute that before cluster teardown.
-			if o.federation {
-				defer control.XMLWrap(&suite, "Deferred Federation TearDown", func() error {
-					if !federationDownDone {
-						return fedDown()
-					}
-					return nil
-				})
-			}
 		}
 		// Start the cluster using this version.
 		if err := control.XMLWrap(&suite, "Up", deploy.Up); err != nil {
@@ -136,21 +125,13 @@ func run(deploy deployer, o options) error {
 			}
 			return fmt.Errorf("starting e2e cluster: %s", err)
 		}
-		if o.federation {
-			if err := control.XMLWrap(&suite, "Federation Up", fedUp); err != nil {
-				control.XMLWrap(&suite, "dumpFederationLogs", func() error {
-					return dumpFederationLogs(dump)
-				})
-				return fmt.Errorf("error starting federation: %s", err)
-			}
-		}
 		// If node testing is enabled, check that the api is reachable before
 		// proceeding with further steps. This is accomplished by listing the nodes.
 		if !o.nodeTests {
 			errs = util.AppendError(errs, control.XMLWrap(&suite, "Check APIReachability", func() error { return getKubectlVersion(deploy) }))
 			if dump != "" {
 				errs = util.AppendError(errs, control.XMLWrap(&suite, "list nodes", func() error {
-					return listNodes(dump)
+					return listNodes(deploy, dump)
 				}))
 			}
 		}
@@ -195,10 +176,6 @@ func run(deploy deployer, o options) error {
 			}))
 		} else if err := control.XMLWrap(&suite, "IsUp", deploy.IsUp); err != nil {
 			errs = util.AppendError(errs, err)
-		} else if o.federation {
-			errs = util.AppendError(errs, control.XMLWrap(&suite, "FederationTest", func() error {
-				return federationTest(testArgs)
-			}))
 		} else {
 			if o.deployment != "conformance" {
 				errs = util.AppendError(errs, control.XMLWrap(&suite, "kubectl version", func() error { return getKubectlVersion(deploy) }))
@@ -224,6 +201,19 @@ func run(deploy deployer, o options) error {
 		}
 	}
 
+	if o.kubemark {
+		errs = util.AppendError(errs, control.XMLWrap(&suite, "Kubemark Overall", func() error {
+			if err := kubemarkUp(dump, o, deploy); err != nil {
+				return err
+			}
+			// running test in clusterloader, or other custom commands, skip the ginkgo call
+			if o.testCmd != "" {
+				return nil
+			}
+			return kubemarkGinkgoTest(testArgs, dump)
+		}))
+	}
+
 	if o.testCmd != "" {
 		if err := control.XMLWrap(&suite, "test setup", deploy.TestSetup); err != nil {
 			errs = util.AppendError(errs, err)
@@ -235,16 +225,13 @@ func run(deploy deployer, o options) error {
 		}
 	}
 
-	// TODO(bentheelder): consider remapping charts, etc to testCmd
+	// TODO: consider remapping charts, etc to testCmd
 
 	var kubemarkWg sync.WaitGroup
 	var kubemarkDownErr error
 	if o.kubemark {
-		errs = util.AppendError(errs, control.XMLWrap(&suite, "Kubemark Overall", func() error {
-			return kubemarkTest(testArgs, dump, o, deploy)
-		}))
 		kubemarkWg.Add(1)
-		go kubemarkDown(&kubemarkDownErr, &kubemarkWg)
+		go kubemarkDown(&kubemarkDownErr, &kubemarkWg, dump)
 	}
 
 	if o.charts {
@@ -263,18 +250,6 @@ func run(deploy deployer, o options) error {
 	}
 
 	if o.down {
-		if o.federation {
-			errs = util.AppendError(errs, control.XMLWrap(&suite, "Federation TearDown", func() error {
-				if !federationDownDone {
-					err := fedDown()
-					if err != nil {
-						return err
-					}
-					federationDownDone = true
-				}
-				return nil
-			}))
-		}
 		errs = util.AppendError(errs, control.XMLWrap(&suite, "TearDown", func() error {
 			if !downDone {
 				err := deploy.Down()
@@ -292,9 +267,7 @@ func run(deploy deployer, o options) error {
 	errs = util.AppendError(errs, kubemarkDownErr)
 
 	// Save the state if we upped a new cluster without downing it
-	// or we are turning up federated clusters without turning up
-	// the federation control plane.
-	if o.save != "" && ((!o.down && o.up) || (!o.federation && o.up && o.deployment != "none")) {
+	if o.save != "" && ((!o.down && o.up) || (o.up && o.deployment != "none")) {
 		errs = util.AppendError(errs, control.XMLWrap(&suite, "Save Cluster State", func() error {
 			return saveState(o.save)
 		}))
@@ -372,25 +345,36 @@ func dumpRemoteLogs(deploy deployer, o options, path, reason string) []error {
 	errs = util.AppendError(errs, control.XMLWrap(&suite, reason+"DumpClusterLogs", func() error {
 		return deploy.DumpClusterLogs(path, o.logexporterGCSPath)
 	}))
-	if o.federation {
-		errs = util.AppendError(errs, control.XMLWrap(&suite, reason+"dumpFederationLogs", func() error {
-			return dumpFederationLogs(path)
-		}))
-	}
 
 	return errs
 }
 
-func listNodes(dump string) error {
-	b, err := control.Output(exec.Command("./cluster/kubectl.sh", "--match-server-version=false", "get", "nodes", "-oyaml"))
+func listNodes(dp deployer, dump string) error {
+	cmd, err := dp.KubectlCommand()
+	if err != nil {
+		return err
+	}
+	if cmd == nil {
+		cmd = exec.Command("./cluster/kubectl.sh")
+	}
+	cmd.Args = append(cmd.Args, "--match-server-version=false", "get", "nodes", "-oyaml")
+	b, err := control.Output(cmd)
 	if err != nil {
 		return err
 	}
 	return ioutil.WriteFile(filepath.Join(dump, "nodes.yaml"), b, 0644)
 }
 
-func listKubemarkNodes(dump string) error {
-	b, err := control.Output(exec.Command("./cluster/kubectl.sh", "--match-server-version=false", "--kubeconfig=./test/kubemark/resources/kubeconfig.kubemark", "get", "nodes", "-oyaml"))
+func listKubemarkNodes(dp deployer, dump string) error {
+	cmd, err := dp.KubectlCommand()
+	if err != nil {
+		return err
+	}
+	if cmd == nil {
+		cmd = exec.Command("./cluster/kubectl.sh")
+	}
+	cmd.Args = append(cmd.Args, "--match-server-version=false", "--kubeconfig=./test/kubemark/resources/kubeconfig.kubemark", "get", "nodes", "-oyaml")
+	b, err := control.Output(cmd)
 	if err != nil {
 		return err
 	}
@@ -541,25 +525,6 @@ func defaultDumpClusterLogs(localArtifactsDir, logexporterGCSPath string) error 
 	return control.FinishRunning(cmd)
 }
 
-func dumpFederationLogs(location string) error {
-	// TODO(shashidharatd): Remove below logic of choosing the scripts to run from federation
-	// repo once the k8s deployment in federation jobs moves to kubernetes-anywhere
-	var logDumpPath string
-	if useFederationRepo() {
-		logDumpPath = "../federation/deploy/cluster/log-dump.sh"
-	} else {
-		logDumpPath = "./federation/cluster/log-dump.sh"
-	}
-	// federation/cluster/log-dump.sh only exists in the Kubernetes tree
-	// post-1.6. If it doesn't exist, do nothing and do not report an error.
-	if _, err := os.Stat(logDumpPath); err == nil {
-		log.Printf("Dumping Federation logs to: %v", location)
-		return control.FinishRunning(exec.Command(logDumpPath, location))
-	}
-	log.Printf("Could not find %s. This is expected if running tests against a Kubernetes 1.6 or older tree.", logDumpPath)
-	return nil
-}
-
 func chartsTest() error {
 	// Run helm tests.
 	cmdline := util.K8s("charts", "test", "helm-test-e2e.sh")
@@ -578,6 +543,12 @@ func nodeTest(nodeArgs []string, testArgs, nodeTestArgs, project, zone string) e
 		return fmt.Errorf("Cannot find ssh key from: %v, err : %v", sshKeyPath, err)
 	}
 
+	artifactsDir, ok := os.LookupEnv("ARTIFACTS")
+	if !ok {
+		// TODO(krzyzacy): old behavior, consider deprecate
+		artifactsDir = filepath.Join(os.Getenv("WORKSPACE"), "_artifacts")
+	}
+
 	// prep node args
 	runner := []string{
 		"run",
@@ -586,7 +557,7 @@ func nodeTest(nodeArgs []string, testArgs, nodeTestArgs, project, zone string) e
 		"--logtostderr",
 		"--vmodule=*=4",
 		"--ssh-env=gce",
-		fmt.Sprintf("--results-dir=%s/_artifacts", os.Getenv("WORKSPACE")),
+		fmt.Sprintf("--results-dir=%s", artifactsDir),
 		fmt.Sprintf("--project=%s", project),
 		fmt.Sprintf("--zone=%s", zone),
 		fmt.Sprintf("--ssh-user=%s", os.Getenv("USER")),
@@ -601,7 +572,7 @@ func nodeTest(nodeArgs []string, testArgs, nodeTestArgs, project, zone string) e
 	return control.FinishRunning(exec.Command("go", runner...))
 }
 
-func kubemarkTest(testArgs []string, dump string, o options, deploy deployer) error {
+func kubemarkUp(dump string, o options, deploy deployer) error {
 	// Stop previously running kubemark cluster (if any).
 	if err := control.XMLWrap(&suite, "Kubemark TearDown Previous", func() error {
 		return control.FinishRunning(exec.Command("./test/kubemark/stop-kubemark.sh"))
@@ -617,52 +588,61 @@ func kubemarkTest(testArgs []string, dump string, o options, deploy deployer) er
 	if err := control.XMLWrap(&suite, "Kubemark Up", func() error {
 		return control.FinishRunning(exec.Command("./test/kubemark/start-kubemark.sh"))
 	}); err != nil {
-		if dump != "" {
-			control.XMLWrap(&suite, "Kubemark MasterLogDump (--up failed)", func() error {
-				return control.FinishRunning(exec.Command("./test/kubemark/master-log-dump.sh", dump))
-			})
-		}
 		return err
 	}
 
 	// Check kubemark apiserver reachability by listing all nodes.
 	if dump != "" {
 		control.XMLWrap(&suite, "list kubemark nodes", func() error {
-			return listKubemarkNodes(dump)
+			return listKubemarkNodes(deploy, dump)
 		})
 	}
 
+	// detect master IP
+	if err := os.Setenv("MASTER_NAME", os.Getenv("INSTANCE_PREFIX")+"-kubemark-master"); err != nil {
+		return err
+	}
+
+	masterIP, err := control.Output(exec.Command(
+		"gcloud", "compute", "addresses", "describe",
+		os.Getenv("MASTER_NAME")+"-ip",
+		"--project="+o.gcpProject,
+		"--region="+o.gcpZone[:len(o.gcpZone)-2],
+		"--format=value(address)"))
+	if err != nil {
+		return fmt.Errorf("failed to get masterIP: %v", err)
+	}
+	if err := os.Setenv("KUBE_MASTER_IP", strings.TrimSpace(string(masterIP))); err != nil {
+		return err
+	}
+	// MASTER_IP variable is required by the clusterloader. It requires to have master ip provided,
+	// due to master being unregistered.
+	if err := os.Setenv("MASTER_IP", strings.TrimSpace(string(masterIP))); err != nil {
+		return err
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	if err := os.Setenv("KUBECONFIG", fmt.Sprintf("%s/test/kubemark/resources/kubeconfig.kubemark", cwd)); err != nil {
+		return err
+	}
+
+	// 'Stop kubemark cluster' step has now been moved outside this function
+	// to make it asynchronous with other steps (to speed test execution).
+	return nil
+}
+
+func kubemarkGinkgoTest(testArgs []string, dump string) error {
+	if os.Getenv("ENABLE_KUBEMARK_CLUSTER_AUTOSCALER") == "true" {
+		testArgs = append(testArgs, "--kubemark-external-kubeconfig="+os.Getenv("DEFAULT_KUBECONFIG"))
+	}
+
 	// Run tests on the kubemark cluster.
-	if err := control.XMLWrap(&suite, "Kubemark Test", func() error {
-		testArgs = util.SetFieldDefault(testArgs, "--ginkgo.focus", "starting\\s30\\pods")
-
-		// detect master IP
-		if err := os.Setenv("MASTER_NAME", os.Getenv("INSTANCE_PREFIX")+"-kubemark-master"); err != nil {
-			return err
-		}
-
-		masterIP, err := control.Output(exec.Command(
-			"gcloud", "compute", "addresses", "describe",
-			os.Getenv("MASTER_NAME")+"-ip",
-			"--project="+o.gcpProject,
-			"--region="+o.gcpZone[:len(o.gcpZone)-2],
-			"--format=value(address)"))
-		if err != nil {
-			return fmt.Errorf("failed to get masterIP: %v", err)
-		}
-		if err := os.Setenv("KUBE_MASTER_IP", strings.TrimSpace(string(masterIP))); err != nil {
-			return err
-		}
-
-		if os.Getenv("ENABLE_KUBEMARK_CLUSTER_AUTOSCALER") == "true" {
-			testArgs = append(testArgs, "--kubemark-external-kubeconfig="+os.Getenv("DEFAULT_KUBECONFIG"))
-		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-
+	return control.XMLWrap(&suite, "Kubemark Test", func() error {
+		testArgs = util.SetFieldDefault(testArgs, "--ginkgo.focus", "starting\\s30\\spods")
 		// TODO(krzyzacy): unsure if the envs in kubemark/util.sh makes a difference to e2e tests
 		//                 will verify and remove (or uncomment) next
 		//util := os.Getenv("WORKSPACE") + "/kubernetes/cluster/kubemark/util.sh"
@@ -672,33 +652,19 @@ func kubemarkTest(testArgs []string, dump string, o options, deploy deployer) er
 			os.Environ(),
 			"KUBERNETES_PROVIDER=kubemark",
 			"KUBE_CONFIG_FILE=config-default.sh",
-			fmt.Sprintf("KUBECONFIG=%s/test/kubemark/resources/kubeconfig.kubemark", cwd),
 			"KUBE_MASTER_URL=https://"+os.Getenv("KUBE_MASTER_IP"),
 		)
 
 		return control.FinishRunning(cmd)
-	}); err != nil {
-		if dump != "" {
-			control.XMLWrap(&suite, "Kubemark MasterLogDump (--test failed)", func() error {
-				return control.FinishRunning(exec.Command("./test/kubemark/master-log-dump.sh", dump))
-			})
-		}
-		return err
-	}
-
-	// Dump logs from kubemark master.
-	control.XMLWrap(&suite, "Kubemark MasterLogDump", func() error {
-		return control.FinishRunning(exec.Command("./test/kubemark/master-log-dump.sh", dump))
 	})
-
-	// 'Stop kubemark cluster' step has now been moved outside this function
-	// to make it asynchronous with other steps (to speed test execution).
-	return nil
 }
 
 // Brings down the kubemark cluster.
-func kubemarkDown(err *error, wg *sync.WaitGroup) {
+func kubemarkDown(err *error, wg *sync.WaitGroup, dump string) {
 	defer wg.Done()
+	control.XMLWrap(&suite, "Kubemark MasterLogDump", func() error {
+		return control.FinishRunning(exec.Command("./test/kubemark/master-log-dump.sh", dump))
+	})
 	*err = control.XMLWrap(&suite, "Kubemark TearDown", func() error {
 		return control.FinishRunning(exec.Command("./test/kubemark/stop-kubemark.sh"))
 	})

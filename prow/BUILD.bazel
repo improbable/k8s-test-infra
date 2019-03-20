@@ -2,18 +2,20 @@ package(default_visibility = ["//visibility:public"])
 
 load("@io_bazel_rules_docker//container:bundle.bzl", "container_bundle")
 load("@io_bazel_rules_docker//contrib:push-all.bzl", "docker_push")
-load("//prow:def.bzl", "prefix", "tags")
+load("//prow:def.bzl", "prefix", "tags", "prow_push")
 load(
     "//def:image.bzl",
     image_tags = "tags",
 )
 
-container_bundle(
-    name = "release",
+prow_push(
+    name = "release-push",
+    bundle_name = "release",
     images = tags(
         "artifact-uploader",
         "branchprotector",
         "build",
+        "checkconfig",
         "clonerefs",
         "deck",
         "entrypoint",
@@ -29,6 +31,7 @@ container_bundle(
         "sidecar",
         "sinker",
         "status-reconciler",
+        "sub",
         "tide",
         "tot",
     ) + image_tags(**{
@@ -37,13 +40,13 @@ container_bundle(
         prefix("cherrypicker"): "//prow/external-plugins/cherrypicker:image",
     }) + image_tags(**{
         prefix("refresh"): "//prow/external-plugins/refresh:image",
+    }) + image_tags(**{
+        prefix("ghproxy"): "//ghproxy:image",
+    }) + image_tags(**{
+        prefix("label_sync"): "//label_sync:image",
+    }) + image_tags(**{
+        prefix("commenter"): "//robots/commenter:image",
     }),
-    stamp = True,
-)
-
-docker_push(
-    name = "release-push",
-    bundle = ":release",
 )
 
 filegroup(
@@ -74,6 +77,7 @@ filegroup(
         "//prow/cmd/build:all-srcs",
         "//prow/cmd/checkconfig:all-srcs",
         "//prow/cmd/clonerefs:all-srcs",
+        "//prow/cmd/config-bootstrapper:all-srcs",
         "//prow/cmd/crier:all-srcs",
         "//prow/cmd/deck:all-srcs",
         "//prow/cmd/entrypoint:all-srcs",
@@ -93,9 +97,10 @@ filegroup(
         "//prow/cmd/sidecar:all-srcs",
         "//prow/cmd/sinker:all-srcs",
         "//prow/cmd/status-reconciler:all-srcs",
+        "//prow/cmd/sub:all-srcs",
+        "//prow/cmd/tackle:all-srcs",
         "//prow/cmd/tide:all-srcs",
         "//prow/cmd/tot:all-srcs",
-        "//prow/cmd/util:all-srcs",
         "//prow/commentpruner:all-srcs",
         "//prow/config:all-srcs",
         "//prow/crier:all-srcs",
@@ -113,6 +118,7 @@ filegroup(
         "//prow/gerrit/client:all-srcs",
         "//prow/gerrit/reporter:all-srcs",
         "//prow/git:all-srcs",
+        "//prow/gitattributes:all-srcs",
         "//prow/github:all-srcs",
         "//prow/githuboauth:all-srcs",
         "//prow/hook:all-srcs",
@@ -135,8 +141,8 @@ filegroup(
         "//prow/pod-utils/wrapper:all-srcs",
         "//prow/prstatus:all-srcs",
         "//prow/pubsub/reporter:all-srcs",
+        "//prow/pubsub/subscriber:all-srcs",
         "//prow/repoowners:all-srcs",
-        "//prow/report:all-srcs",
         "//prow/sidecar:all-srcs",
         "//prow/slack:all-srcs",
         "//prow/spyglass:all-srcs",

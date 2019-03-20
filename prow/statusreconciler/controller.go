@@ -23,23 +23,26 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	prowv1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 
 	"k8s.io/test-infra/maintenance/migratestatus/migrator"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/errorutil"
 	"k8s.io/test-infra/prow/github"
-	"k8s.io/test-infra/prow/kube"
-	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/plugins"
 	"k8s.io/test-infra/prow/plugins/trigger"
 )
 
 // NewController constructs a new controller to reconcile stauses on config change
-func NewController(continueOnError bool, kubeClient *kube.Client, githubClient *github.Client, pluginAgent *plugins.ConfigAgent) *Controller {
+func NewController(continueOnError bool, prowJobClient prowv1.ProwJobInterface, githubClient *github.Client, configAgent *config.Agent, pluginAgent *plugins.ConfigAgent) *Controller {
 	return &Controller{
 		continueOnError: continueOnError,
-		kubeClient:      kubeClient,
-		githubClient:    githubClient,
+		prowJobTriggerer: &kubeProwJobTriggerer{
+			prowJobClient: prowJobClient,
+			githubClient:  githubClient,
+			configAgent:   configAgent,
+		},
+		githubClient: githubClient,
 		statusMigrator: &gitHubMigrator{
 			githubClient:    githubClient,
 			continueOnError: continueOnError,
@@ -52,8 +55,8 @@ func NewController(continueOnError bool, kubeClient *kube.Client, githubClient *
 }
 
 type statusMigrator interface {
-	retire(org, repo, context string) error
-	migrate(org, repo, from, to string) error
+	retire(org, repo, context string, targetBranchFilter func(string) bool) error
+	migrate(org, repo, from, to string, targetBranchFilter func(string) bool) error
 }
 
 type gitHubMigrator struct {
@@ -61,27 +64,44 @@ type gitHubMigrator struct {
 	continueOnError bool
 }
 
-func (m *gitHubMigrator) retire(org, repo, context string) error {
+func (m *gitHubMigrator) retire(org, repo, context string, targetBranchFilter func(string) bool) error {
 	return migrator.New(
 		*migrator.RetireMode(context, "", ""),
-		m.githubClient, org, repo, m.continueOnError,
+		m.githubClient, org, repo, targetBranchFilter, m.continueOnError,
 	).Migrate()
 }
 
-func (m *gitHubMigrator) migrate(org, repo, from, to string) error {
+func (m *gitHubMigrator) migrate(org, repo, from, to string, targetBranchFilter func(string) bool) error {
 	return migrator.New(
 		*migrator.MoveMode(from, to, ""),
-		m.githubClient, org, repo, m.continueOnError,
+		m.githubClient, org, repo, targetBranchFilter, m.continueOnError,
 	).Migrate()
 }
 
-type kubeClient interface {
-	CreateProwJob(j kube.ProwJob) (kube.ProwJob, error)
+type prowJobTriggerer interface {
+	run(pr *github.PullRequest, requestedJobs []config.Presubmit) error
+}
+
+type kubeProwJobTriggerer struct {
+	prowJobClient prowv1.ProwJobInterface
+	githubClient  *github.Client
+	configAgent   *config.Agent
+}
+
+func (t *kubeProwJobTriggerer) run(pr *github.PullRequest, requestedJobs []config.Presubmit) error {
+	return trigger.RunRequested(
+		trigger.Client{
+			GitHubClient:  t.githubClient,
+			ProwJobClient: t.prowJobClient,
+			Config:        t.configAgent.Config(),
+			Logger:        logrus.WithField("client", "trigger"),
+		},
+		pr, requestedJobs, "none",
+	)
 }
 
 type githubClient interface {
 	GetPullRequests(org, repo string) ([]github.PullRequest, error)
-	GetRef(org, repo, ref string) (string, error)
 }
 
 type trustedChecker interface {
@@ -104,16 +124,16 @@ func (c *githubTrustedChecker) trustedPullRequest(author, org, repo string, num 
 
 // Controller reconciles statuses on PRs when config changes impact blocking presubmits
 type Controller struct {
-	continueOnError bool
-	kubeClient      kubeClient
-	githubClient    githubClient
-	statusMigrator  statusMigrator
-	trustedChecker  trustedChecker
+	continueOnError  bool
+	prowJobTriggerer prowJobTriggerer
+	githubClient     githubClient
+	statusMigrator   statusMigrator
+	trustedChecker   trustedChecker
 }
 
 // Run monitors the incoming configuration changes to determine when statuses need to be
 // reconciled on PRs in flight when blocking presubmits change
-func (c *Controller) Run(stop <-chan os.Signal, changes <-chan config.ConfigDelta) {
+func (c *Controller) Run(stop <-chan os.Signal, changes <-chan config.Delta) {
 	for {
 		select {
 		case change := <-changes:
@@ -129,7 +149,7 @@ func (c *Controller) Run(stop <-chan os.Signal, changes <-chan config.ConfigDelt
 	}
 }
 
-func (c *Controller) reconcile(delta config.ConfigDelta) error {
+func (c *Controller) reconcile(delta config.Delta) error {
 	var errors []error
 	if err := c.triggerNewPresubmits(addedBlockingPresubmits(delta.Before.Presubmits, delta.After.Presubmits)); err != nil {
 		errors = append(errors, err)
@@ -192,22 +212,17 @@ func (c *Controller) triggerIfTrusted(org, repo string, pr github.PullRequest, p
 	if !trusted {
 		return nil
 	}
-	baseSHA, err := c.githubClient.GetRef(org, repo, "heads/"+pr.Base.Ref)
-	if err != nil {
-		return fmt.Errorf("failed to determine base SHA for %s/%s#%d: %v", org, repo, pr.Number, err)
-	}
-	var triggerErrors []error
+	var jobContexts []map[string]string
 	for _, presubmit := range presubmits {
-		pj := pjutil.NewPresubmit(pr, baseSHA, presubmit, "none")
-		logrus.WithFields(pjutil.ProwJobFields(&pj)).Info("Triggering new ProwJob to create newly-required context.")
-		if _, err := c.kubeClient.CreateProwJob(pj); err != nil {
-			triggerErrors = append(triggerErrors, err)
-			if !c.continueOnError {
-				break
-			}
-		}
+		jobContexts = append(jobContexts, map[string]string{"job": presubmit.Name, "context": presubmit.Context})
 	}
-	return errorutil.NewAggregate(triggerErrors...)
+	logrus.WithFields(logrus.Fields{
+		"jobs": jobContexts,
+		"pr":   pr.Number,
+		"org":  org,
+		"repo": repo,
+	}).Info("Triggering new ProwJobs to create newly-required contexts.")
+	return c.prowJobTriggerer.run(&pr, presubmits)
 }
 
 func (c *Controller) retireRemovedContexts(retiredPresubmits map[string][]config.Presubmit) error {
@@ -221,7 +236,7 @@ func (c *Controller) retireRemovedContexts(retiredPresubmits map[string][]config
 				"repo":    repo,
 				"context": presubmit.Context,
 			}).Info("Retiring context.")
-			if err := c.statusMigrator.retire(org, repo, presubmit.Context); err != nil {
+			if err := c.statusMigrator.retire(org, repo, presubmit.Context, presubmit.Brancher.ShouldRun); err != nil {
 				if c.continueOnError {
 					retireErrors = append(retireErrors, err)
 					continue
@@ -245,7 +260,7 @@ func (c *Controller) updateMigratedContexts(migrations map[string][]presubmitMig
 				"from": migration.from.Context,
 				"to":   migration.to.Context,
 			}).Info("Migrating context.")
-			if err := c.statusMigrator.migrate(org, repo, migration.from.Context, migration.to.Context); err != nil {
+			if err := c.statusMigrator.migrate(org, repo, migration.from.Context, migration.to.Context, migration.from.Brancher.ShouldRun); err != nil {
 				if c.continueOnError {
 					migrateErrors = append(migrateErrors, err)
 					continue
@@ -268,7 +283,7 @@ func addedBlockingPresubmits(old, new map[string][]config.Presubmit) map[string]
 	for repo, oldPresubmits := range old {
 		added[repo] = []config.Presubmit{}
 		for _, newPresubmit := range new[repo] {
-			if !newPresubmit.ContextRequired() {
+			if !newPresubmit.ContextRequired() || newPresubmit.NeedsExplicitTrigger() {
 				continue
 			}
 			var found bool
@@ -280,6 +295,13 @@ func addedBlockingPresubmits(old, new map[string][]config.Presubmit) map[string]
 							"repo": repo,
 							"name": oldPresubmit.Name,
 						}).Debug("Identified a newly-reporting blocking presubmit.")
+					}
+					if oldPresubmit.RunIfChanged != newPresubmit.RunIfChanged {
+						added[repo] = append(added[repo], newPresubmit)
+						logrus.WithFields(logrus.Fields{
+							"repo": repo,
+							"name": oldPresubmit.Name,
+						}).Debug("Identified a blocking presubmit running over a different set of files.")
 					}
 					found = true
 					break
@@ -295,7 +317,11 @@ func addedBlockingPresubmits(old, new map[string][]config.Presubmit) map[string]
 		}
 	}
 
-	logrus.Infof("Identified %d added blocking presubmits.", len(added))
+	var numAdded int
+	for _, presubmits := range added {
+		numAdded += len(presubmits)
+	}
+	logrus.Infof("Identified %d added blocking presubmits.", numAdded)
 	return added
 }
 
@@ -329,7 +355,11 @@ func removedBlockingPresubmits(old, new map[string][]config.Presubmit) map[strin
 		}
 	}
 
-	logrus.Infof("Identified %d removed blocking presubmits.", len(removed))
+	var numRemoved int
+	for _, presubmits := range removed {
+		numRemoved += len(presubmits)
+	}
+	logrus.Infof("Identified %d removed blocking presubmits.", numRemoved)
 	return removed
 }
 
@@ -365,6 +395,10 @@ func migratedBlockingPresubmits(old, new map[string][]config.Presubmit) map[stri
 		}
 	}
 
-	logrus.Infof("Identified %d migrated blocking presubmits.", len(migrated))
+	var numMigrated int
+	for _, presubmits := range migrated {
+		numMigrated += len(presubmits)
+	}
+	logrus.Infof("Identified %d migrated blocking presubmits.", numMigrated)
 	return migrated
 }

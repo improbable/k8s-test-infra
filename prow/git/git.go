@@ -18,6 +18,8 @@ limitations under the License.
 package git
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -144,7 +146,7 @@ func (c *Client) Clone(repo string) (*Repo, error) {
 	if _, err := os.Stat(cache); os.IsNotExist(err) {
 		// Cache miss, clone it now.
 		c.logger.Infof("Cloning %s for the first time.", repo)
-		if err := os.Mkdir(filepath.Dir(cache), os.ModePerm); err != nil && !os.IsExist(err) {
+		if err := os.MkdirAll(filepath.Dir(cache), os.ModePerm); err != nil && !os.IsExist(err) {
 			return nil, err
 		}
 		remote := fmt.Sprintf("%s/%s", base, repo)
@@ -244,14 +246,17 @@ func (r *Repo) CheckoutNewBranch(branch string) error {
 func (r *Repo) Merge(commitlike string) (bool, error) {
 	r.logger.Infof("Merging %s.", commitlike)
 	co := r.gitCommand("merge", "--no-ff", "--no-stat", "-m merge", commitlike)
-	if b, err := co.CombinedOutput(); err == nil {
+
+	b, err := co.CombinedOutput()
+	if err == nil {
 		return true, nil
-	} else {
-		r.logger.WithError(err).Warningf("Merge failed with output: %s", string(b))
 	}
+	r.logger.WithError(err).Warningf("Merge failed with output: %s", string(b))
+
 	if b, err := r.gitCommand("merge", "--abort").CombinedOutput(); err != nil {
 		return false, fmt.Errorf("error aborting merge for commitlike %s: %v. output: %s", commitlike, err, string(b))
 	}
+
 	return false, nil
 }
 
@@ -332,4 +337,18 @@ func retryCmd(l *logrus.Entry, dir, cmd string, arg ...string) ([]byte, error) {
 		break
 	}
 	return b, err
+}
+
+func (r *Repo) Diff(head, sha string) (changes []string, err error) {
+	r.logger.Infof("Diff head with %s'.", sha)
+	output, err := r.gitCommand("diff", head, sha, "--name-only").CombinedOutput()
+	if err != nil {
+		return nil, err
+	}
+	scan := bufio.NewScanner(bytes.NewReader(output))
+	scan.Split(bufio.ScanLines)
+	for scan.Scan() {
+		changes = append(changes, scan.Text())
+	}
+	return
 }

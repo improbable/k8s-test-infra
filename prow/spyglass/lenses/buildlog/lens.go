@@ -21,39 +21,35 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html/template"
+	"io"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/sirupsen/logrus"
-	"html/template"
 	"k8s.io/test-infra/prow/spyglass/lenses"
-	"path/filepath"
 )
 
 const (
-	name            = "buildlog"
-	title           = "Build Log"
-	priority        = 10
-	neighborLines   = 5 // number of "important" lines to be displayed in either direction
-	minLinesSkipped = 5
+	name               = "buildlog"
+	title              = "Build Log"
+	priority           = 10
+	neighborLines      = 5 // number of "important" lines to be displayed in either direction
+	minLinesSkipped    = 5
+	maxHighlightLength = 10000 // Maximum length of a line worth highlighting
 )
 
 // Lens implements the build lens.
 type Lens struct{}
 
-// Name returns the name.
-func (lens Lens) Name() string {
-	return name
-}
-
-// Title returns the title.
-func (lens Lens) Title() string {
-	return title
-}
-
-// Priority returns the priority.
-func (lens Lens) Priority() int {
-	return priority
+// Config returns the lens's configuration.
+func (lens Lens) Config() lenses.LensConfig {
+	return lenses.LensConfig{
+		Name:     name,
+		Title:    title,
+		Priority: priority,
+	}
 }
 
 // Header executes the "header" section of the template.
@@ -62,13 +58,13 @@ func (lens Lens) Header(artifacts []lenses.Artifact, resourceDir string) string 
 }
 
 // errRE matches keywords and glog error messages
-var errRE = regexp.MustCompile(`(?i)(\s|^)timed out\b|(\s|^)error(s)?\b|(\s|^)fail(ure|ed)?\b|(\s|^)fatal\b|(\s|^)panic\b|^E\d{4} \d\d:\d\d:\d\d\.\d\d\d]`)
+var errRE = regexp.MustCompile(`timed out|ERROR:|(\s|^)(FAIL|Failure \[)\b|(\s|^)panic\b|^E\d{4} \d\d:\d\d:\d\d\.\d\d\d]`)
 
 func init() {
 	lenses.RegisterLens(Lens{})
 }
 
-// SubLine is a part of a LogLine, used so that error terms can be highlighted.
+// SubLine represents an substring within a LogLine. It it used so error terms can be highlighted.
 type SubLine struct {
 	Highlighted bool
 	Text        string
@@ -91,6 +87,8 @@ type LineGroup struct {
 	LogLines               []LogLine
 }
 
+// LineRequest represents a request for output lines from an artifact. If Offset is 0 and Length
+// is -1, all lines will be fetched.
 type LineRequest struct {
 	Artifact  string `json:"artifact"`
 	Offset    int64  `json:"offset"`
@@ -134,7 +132,7 @@ func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data stri
 		}
 		lines, err := logLinesAll(a)
 		if err != nil {
-			logrus.WithError(err).Error("Error reading log.")
+			logrus.WithError(err).Info("Error reading log.")
 			continue
 		}
 		av.LineGroups = groupLines(highlightLines(lines, 0))
@@ -194,12 +192,12 @@ func logLinesAll(artifact lenses.Artifact) ([]string, error) {
 func logLines(artifact lenses.Artifact, offset, length int64) ([]string, error) {
 	b := make([]byte, length)
 	_, err := artifact.ReadAt(b, offset)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		if err != lenses.ErrGzipOffsetRead {
 			return nil, fmt.Errorf("couldn't read requested bytes: %v", err)
 		}
 		moreBytes, err := artifact.ReadAtMost(offset + length)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("couldn't handle reading gzipped file: %v", err)
 		}
 		b = moreBytes[offset:]
@@ -213,12 +211,14 @@ func highlightLines(lines []string, startLine int) []LogLine {
 	for i, text := range lines {
 		length := len(text)
 		subLines := []SubLine{}
-		loc := errRE.FindStringIndex(text)
-		for loc != nil {
-			subLines = append(subLines, SubLine{false, text[:loc[0]]})
-			subLines = append(subLines, SubLine{true, text[loc[0]:loc[1]]})
-			text = text[loc[1]:]
-			loc = errRE.FindStringIndex(text)
+		if length <= maxHighlightLength {
+			loc := errRE.FindStringIndex(text)
+			for loc != nil {
+				subLines = append(subLines, SubLine{false, text[:loc[0]]})
+				subLines = append(subLines, SubLine{true, text[loc[0]:loc[1]]})
+				text = text[loc[1]:]
+				loc = errRE.FindStringIndex(text)
+			}
 		}
 		subLines = append(subLines, SubLine{false, text})
 		logLines = append(logLines, LogLine{

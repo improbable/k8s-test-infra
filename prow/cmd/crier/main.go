@@ -19,7 +19,6 @@ package main
 import (
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -27,32 +26,29 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"golang.org/x/time/rate"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/util/workqueue"
+	"k8s.io/test-infra/prow/pjutil"
 
-	prowjobclientset "k8s.io/test-infra/prow/client/clientset/versioned"
+	v1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	prowjobinformer "k8s.io/test-infra/prow/client/informers/externalversions"
-
 	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/crier"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
 	gerritclient "k8s.io/test-infra/prow/gerrit/client"
 	gerritreporter "k8s.io/test-infra/prow/gerrit/reporter"
 	githubreporter "k8s.io/test-infra/prow/github/reporter"
+	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/logrusutil"
 	pubsubreporter "k8s.io/test-infra/prow/pubsub/reporter"
 )
 
 const (
-	resync = 0 * time.Minute
+	resync         = 0 * time.Minute
+	controllerName = "prow-crier"
 )
 
 type options struct {
-	masterURL      string
-	kubeConfig     string
+	client         prowflagutil.ExperimentalKubernetesOptions
 	cookiefilePath string
 	gerritProjects gerritclient.ProjectsFlag
 	github         prowflagutil.GitHubOptions
@@ -65,10 +61,15 @@ type options struct {
 	pubsubWorkers int
 	githubWorkers int
 
-	dryrun bool
+	dryrun      bool
+	reportAgent string
 }
 
 func (o *options) validate() error {
+	if o.configPath == "" {
+		return errors.New("required flag --config-path was unset")
+	}
+
 	if o.gerritWorkers > 1 {
 		// TODO(krzyzacy): try to see how to handle racy better for gerrit aggregate report.
 		logrus.Warn("gerrit reporter only supports one worker")
@@ -95,17 +96,20 @@ func (o *options) validate() error {
 		}
 	}
 
+	if err := o.client.Validate(o.dryrun); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (o *options) parseArgs(fs *flag.FlagSet, args []string) error {
-	fs.StringVar(&o.masterURL, "masterurl", "", "URL to k8s master")
-	fs.StringVar(&o.kubeConfig, "kubeconfig", "", "Cluster config for the cluster you want to connect to")
 	fs.StringVar(&o.cookiefilePath, "cookiefile", "", "Path to git http.cookiefile, leave empty for anonymous")
 	fs.Var(&o.gerritProjects, "gerrit-projects", "Set of gerrit repos to monitor on a host example: --gerrit-host=https://android.googlesource.com=platform/build,toolchain/llvm, repeat flag for each host")
 	fs.IntVar(&o.gerritWorkers, "gerrit-workers", 0, "Number of gerrit report workers (0 means disabled)")
 	fs.IntVar(&o.pubsubWorkers, "pubsub-workers", 0, "Number of pubsub report workers (0 means disabled)")
 	fs.IntVar(&o.githubWorkers, "github-workers", 0, "Number of github report workers (0 means disabled)")
+	fs.StringVar(&o.reportAgent, "report-agent", "", "Only report specified agent - empty means report to all agents (effective for github only)")
 
 	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
 	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
@@ -114,6 +118,7 @@ func (o *options) parseArgs(fs *flag.FlagSet, args []string) error {
 	fs.BoolVar(&o.dryrun, "dry-run", false, "Run in dry-run mode, not doing actual report (effective for github only)")
 
 	o.github.AddFlags(fs)
+	o.client.AddFlags(fs)
 
 	fs.Parse(args)
 
@@ -132,53 +137,6 @@ func parseOptions() options {
 	return o
 }
 
-// TODO(krzyzacy): copy & paste, refactor this
-// loadClusterConfig loads connection configuration
-// for the cluster we're deploying to. We prefer to
-// use in-cluster configuration if possible, but will
-// fall back to using default rules otherwise.
-func loadClusterConfig(masterURL, kubeConfig string) (*rest.Config, error) {
-	clusterConfig, err := clientcmd.BuildConfigFromFlags(masterURL, kubeConfig)
-	if err == nil {
-		return clusterConfig, nil
-	}
-
-	credentials, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
-	if err != nil {
-		return nil, fmt.Errorf("could not load credentials from config: %v", err)
-	}
-
-	clusterConfig, err = clientcmd.NewDefaultClientConfig(*credentials, &clientcmd.ConfigOverrides{}).ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("could not load client configuration: %v", err)
-	}
-	return clusterConfig, nil
-}
-
-// TODO(krzyzacy): move this to kube???
-// getKubernetesClient retrieves the Kubernetes cluster
-// client from within the cluster
-func getKubernetesClient(masterURL, kubeConfig string) (kubernetes.Interface, prowjobclientset.Interface) {
-	config, err := loadClusterConfig(masterURL, kubeConfig)
-	if err != nil {
-		logrus.Fatalf("failed to load cluster config: %v", err)
-	}
-
-	// generate the client based off of the config
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		logrus.Fatalf("getClusterConfig: %v", err)
-	}
-
-	prowjobClient, err := prowjobclientset.NewForConfig(config)
-	if err != nil {
-		logrus.Fatalf("getClusterConfig: %v", err)
-	}
-
-	logrus.Info("Successfully constructed k8s client")
-	return client, prowjobClient
-}
-
 func main() {
 	o := parseOptions()
 
@@ -186,18 +144,22 @@ func main() {
 		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "crier"}),
 	)
 
-	_, prowjobClient := getKubernetesClient(o.masterURL, o.kubeConfig)
+	pjutil.ServePProf()
 
-	prowjobInformerFactory := prowjobinformer.NewSharedInformerFactory(prowjobClient, resync)
+	configAgent := &config.Agent{}
+	if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
+		logrus.WithError(err).Fatal("Error starting config agent.")
+	}
+	cfg := configAgent.Config
 
-	queue := workqueue.NewRateLimitingQueue(
-		workqueue.NewMaxOfRateLimiter(
-			workqueue.NewItemExponentialFailureRateLimiter(1*time.Second, 60*time.Second),
-			// 10 qps, 100 bucket size.  This is only for retry speed and its only the overall factor (not per item)
-			&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
-		))
+	prowjobClientset, err := o.client.ProwJobClientset(cfg().ProwJobNamespace, o.dryrun)
+	if err != nil {
+		logrus.WithError(err).Fatal("unable to create prow job client")
+	}
 
-	controllers := []*crier.Controller{}
+	prowjobInformerFactory := prowjobinformer.NewSharedInformerFactory(prowjobClientset, resync)
+
+	var controllers []*crier.Controller
 
 	// track all worker status before shutdown
 	wg := &sync.WaitGroup{}
@@ -212,8 +174,8 @@ func main() {
 		controllers = append(
 			controllers,
 			crier.NewController(
-				prowjobClient,
-				queue,
+				prowjobClientset,
+				kube.RateLimiter(gerritReporter.GetName()),
 				informer,
 				gerritReporter,
 				o.gerritWorkers,
@@ -221,19 +183,20 @@ func main() {
 	}
 
 	if o.pubsubWorkers > 0 {
+		pubsubReporter := pubsubreporter.NewReporter(cfg)
 		controllers = append(
 			controllers,
 			crier.NewController(
-				prowjobClient,
-				queue,
+				prowjobClientset,
+				kube.RateLimiter(pubsubReporter.GetName()),
 				prowjobInformerFactory.Prow().V1().ProwJobs(),
-				pubsubreporter.NewReporter(),
+				pubsubReporter,
 				o.pubsubWorkers,
 				wg))
 	}
 
 	if o.githubWorkers > 0 {
-		secretAgent := &config.SecretAgent{}
+		secretAgent := &secret.Agent{}
 		if o.github.TokenPath != "" {
 			if err := secretAgent.Start([]string{o.github.TokenPath}); err != nil {
 				logrus.WithError(err).Fatal("Error starting secrets agent")
@@ -245,18 +208,14 @@ func main() {
 			logrus.WithError(err).Fatal("Error getting GitHub client.")
 		}
 
-		configAgent := &config.Agent{}
-		if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
-			logrus.WithError(err).Fatal("Error starting config agent.")
-		}
-
+		githubReporter := githubreporter.NewReporter(githubClient, cfg, v1.ProwJobAgent(o.reportAgent))
 		controllers = append(
 			controllers,
 			crier.NewController(
-				prowjobClient,
-				queue,
+				prowjobClientset,
+				kube.RateLimiter(githubReporter.GetName()),
 				prowjobInformerFactory.Prow().V1().ProwJobs(),
-				githubreporter.NewReporter(githubClient, configAgent),
+				githubReporter,
 				o.githubWorkers,
 				wg))
 	}

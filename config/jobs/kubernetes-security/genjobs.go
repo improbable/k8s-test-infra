@@ -27,23 +27,24 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
 	flag "github.com/spf13/pflag"
-	"sigs.k8s.io/yaml"
 
-	"k8s.io/api/core/v1"
+	coreapi "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
-	"k8s.io/test-infra/prow/kube"
 )
 
 var configPath = flag.String("config", "", "path to prow/config.yaml, defaults to $PWD/../../prow/config.yaml")
@@ -51,7 +52,7 @@ var jobsPath = flag.String("jobs", "", "path to prowjobs, defaults to $PWD/../")
 var outputPath = flag.String("output", "", "path to output the generated jobs to, defaults to $PWD/generated-security-jobs.yaml")
 
 // remove merged presets from a podspec
-func undoPreset(preset *config.Preset, labels map[string]string, pod *v1.PodSpec) {
+func undoPreset(preset *config.Preset, labels map[string]string, pod *coreapi.PodSpec) {
 	// skip presets that do not match the job labels
 	for l, v := range preset.Labels {
 		if v2, ok := labels[l]; !ok || v2 != v {
@@ -74,7 +75,7 @@ func undoPreset(preset *config.Preset, labels map[string]string, pod *v1.PodSpec
 	}
 
 	// remove volumes from spec
-	filteredVolumes := []v1.Volume{}
+	filteredVolumes := []coreapi.Volume{}
 	for _, volume := range pod.Volumes {
 		if !removeVolumeNames.Has(volume.Name) {
 			filteredVolumes = append(filteredVolumes, volume)
@@ -84,7 +85,7 @@ func undoPreset(preset *config.Preset, labels map[string]string, pod *v1.PodSpec
 
 	// remove env and volume mounts from containers
 	for i := range pod.Containers {
-		filteredEnv := []v1.EnvVar{}
+		filteredEnv := []coreapi.EnvVar{}
 		for _, env := range pod.Containers[i].Env {
 			if !removeEnvNames.Has(env.Name) {
 				filteredEnv = append(filteredEnv, env)
@@ -92,7 +93,7 @@ func undoPreset(preset *config.Preset, labels map[string]string, pod *v1.PodSpec
 		}
 		pod.Containers[i].Env = filteredEnv
 
-		filteredVolumeMounts := []v1.VolumeMount{}
+		filteredVolumeMounts := []coreapi.VolumeMount{}
 		for _, mount := range pod.Containers[i].VolumeMounts {
 			if !removeVolumeMountNames.Has(mount.Name) {
 				filteredVolumeMounts = append(filteredVolumeMounts, mount)
@@ -110,17 +111,13 @@ func undoPresubmitPresets(presets []config.Preset, presubmit *config.Presubmit) 
 	for _, preset := range presets {
 		undoPreset(&preset, presubmit.Labels, presubmit.Spec)
 	}
-	// do the same for any run after success children
-	for i := range presubmit.RunAfterSuccess {
-		undoPresubmitPresets(presets, &presubmit.RunAfterSuccess[i])
-	}
 }
 
 // convert a kubernetes/kubernetes job to a kubernetes-security/kubernetes job
 // dropLabels should be a set of "k: v" strings
 // xref: prow/config/config_test.go replace(...)
 // it will return the same job mutated, or nil if the job should be removed
-func convertJobToSecurityJob(j *config.Presubmit, dropLabels sets.String, podNamespace string) *config.Presubmit {
+func convertJobToSecurityJob(j *config.Presubmit, dropLabels sets.String, defaultDecoration *prowapi.DecorationConfig, podNamespace string) *config.Presubmit {
 	// if a GKE job, disable it
 	if strings.Contains(j.Name, "gke") {
 		return nil
@@ -146,6 +143,9 @@ func convertJobToSecurityJob(j *config.Presubmit, dropLabels sets.String, podNam
 	j.Context = strings.Replace(j.Context, "pull-kubernetes", "pull-security-kubernetes", -1)
 	if j.Namespace != nil && *j.Namespace == podNamespace {
 		j.Namespace = nil
+	}
+	if j.DecorationConfig != nil && reflect.DeepEqual(j.DecorationConfig, defaultDecoration) {
+		j.DecorationConfig = nil
 	}
 
 	// handle k8s job args, volumes etc
@@ -236,7 +236,7 @@ func convertJobToSecurityJob(j *config.Presubmit, dropLabels sets.String, podNam
 		// add ssh key volume / mount
 		container.VolumeMounts = append(
 			container.VolumeMounts,
-			kube.VolumeMount{
+			coreapi.VolumeMount{
 				Name:      "ssh-security",
 				MountPath: "/etc/ssh-security",
 			},
@@ -244,27 +244,16 @@ func convertJobToSecurityJob(j *config.Presubmit, dropLabels sets.String, podNam
 		defaultMode := int32(0400)
 		j.Spec.Volumes = append(
 			j.Spec.Volumes,
-			kube.Volume{
+			coreapi.Volume{
 				Name: "ssh-security",
-				VolumeSource: kube.VolumeSource{
-					Secret: &kube.SecretSource{
+				VolumeSource: coreapi.VolumeSource{
+					Secret: &coreapi.SecretVolumeSource{
 						SecretName:  "ssh-security",
 						DefaultMode: &defaultMode,
 					},
 				},
 			},
 		)
-	}
-	// done with this job, check for run_after_success
-	if len(j.RunAfterSuccess) > 0 {
-		filteredRunAfterSucces := []config.Presubmit{}
-		for i := range j.RunAfterSuccess {
-			newJob := convertJobToSecurityJob(&j.RunAfterSuccess[i], dropLabels, podNamespace)
-			if newJob != nil {
-				filteredRunAfterSucces = append(filteredRunAfterSucces, *newJob)
-			}
-		}
-		j.RunAfterSuccess = filteredRunAfterSucces
 	}
 	return j
 }
@@ -314,6 +303,11 @@ func copyFile(srcPath, destPath string) error {
 	return nil
 }
 
+// minimal job config type for encoding converted presubmits only
+type minimalJobConfig struct {
+	Presubmits map[string][]config.Presubmit `json:"presubmits"`
+}
+
 func main() {
 	flag.Parse()
 	// default to $PWD/prow/config.yaml
@@ -346,11 +340,15 @@ func main() {
 	// write the header
 	io.WriteString(f, "# Autogenerated by genjobs.go, do NOT edit!\n")
 	io.WriteString(f, "# see genjobs.go, which you can run with hack/update-config.sh\n")
-	io.WriteString(f, "presubmits:\n  kubernetes-security/kubernetes:\n")
 
 	// this is the set of preset labels we want to remove
 	// we remove the bazel remote cache because we do not deploy one to this build cluster
 	dropLabels := sets.NewString("preset-bazel-remote-cache-enabled: true")
+
+	// jobs to encode
+	jobs := minimalJobConfig{
+		Presubmits: make(map[string][]config.Presubmit),
+	}
 
 	// convert each kubernetes/kubernetes presubmit to a
 	// kubernetes-security/kubernetes presubmit and write to the file
@@ -359,17 +357,19 @@ func main() {
 		// undo merged presets, this needs to occur first!
 		undoPresubmitPresets(parsed.Presets, job)
 		// now convert the job
-		job = convertJobToSecurityJob(job, dropLabels, parsed.PodNamespace)
+		job = convertJobToSecurityJob(job, dropLabels, parsed.Plank.DefaultDecorationConfig, parsed.PodNamespace)
+		// some jobs are skipped outrigh
 		if job == nil {
 			continue
 		}
-		jobBytes, err := yaml.Marshal(job)
-		if err != nil {
-			log.Fatalf("Failed to marshal job: %v", err)
-		}
-		// write, properly indented, and stripped of `foo: null`
-		jobBytes = yamlBytesStripNulls(jobBytes)
-		f.Write(yamlBytesToEntry(jobBytes, 4))
+		// otherwise record the job
+		jobs.Presubmits["kubernetes-security/kubernetes"] = append(
+			jobs.Presubmits["kubernetes-security/kubernetes"], *job,
+		)
+	}
+	// encode to json for compact encoding
+	if err := json.NewEncoder(f).Encode(&jobs); err != nil {
+		log.Fatalf("Failed to marshal jobs: %v", err)
 	}
 	f.Sync()
 

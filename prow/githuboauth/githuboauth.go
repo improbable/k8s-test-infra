@@ -41,53 +41,56 @@ const (
 	stateKey           = "state"
 )
 
-// GithubClientWrapper is an interface for github clients which implements GetUser method
+// GitHubClientWrapper is an interface for github clients which implements GetUser method
 // that returns github.User.
-type GithubClientWrapper interface {
+type GitHubClientWrapper interface {
 	GetUser(login string) (*github.User, error)
 }
 
-// GithubClientGetter interface is used by handleRedirect to get github client.
-type GithubClientGetter interface {
-	GetGithubClient(accessToken string, dryRun bool) GithubClientWrapper
+// GitHubClientGetter interface is used by handleRedirect to get a GitHub client.
+type GitHubClientGetter interface {
+	GetGitHubClient(accessToken string, dryRun bool) GitHubClientWrapper
 }
 
+// OAuthClient is an interface for a GitHub OAuth client.
 type OAuthClient interface {
-	// Exchanges code from github oauth redirect for user access token.
-	Exchange(ctx context.Context, code string) (*oauth2.Token, error)
-	// Returns a URL to OAuth 2.0 github's consent page. The state is a token to protect user from
-	// XSRF attack.
+	// Exchanges code from GitHub OAuth redirect for user access token.
+	Exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (*oauth2.Token, error)
+	// Returns a URL to GitHub's OAuth 2.0 consent page. The state is a token to protect the user
+	// from an XSRF attack.
 	AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string
 }
 
-type githubClientGetterImpl struct{}
+type githubClientGetter struct{}
 
-func (gci *githubClientGetterImpl) GetGithubClient(accessToken string, dryRun bool) GithubClientWrapper {
+func (gci *githubClientGetter) GetGitHubClient(accessToken string, dryRun bool) GitHubClientWrapper {
 	return ghclient.NewClient(accessToken, dryRun)
 }
 
-func NewGithubClientGetter() GithubClientGetter {
-	return &githubClientGetterImpl{}
+// NewGitHubClientGetter returns a new instance of GitHubClientGetter. It uses the
+// githubClientGetter implementation.
+func NewGitHubClientGetter() GitHubClientGetter {
+	return &githubClientGetter{}
 }
 
-// GithubOAuth Agent represents an agent that takes care Github authentication process such as handles
-// login request from users or handles redirection from Github OAuth server.
-type GithubOAuthAgent struct {
-	gc     *config.GithubOAuthConfig
+// Agent represents an agent that takes care GitHub authentication process such as handles
+// login request from users or handles redirection from GitHub OAuth server.
+type Agent struct {
+	gc     *config.GitHubOAuthConfig
 	logger *logrus.Entry
 }
 
-// Returns new GithubOAUth Agent.
-func NewGithubOAuthAgent(config *config.GithubOAuthConfig, logger *logrus.Entry) *GithubOAuthAgent {
-	return &GithubOAuthAgent{
+// NewAgent returns a new GitHub OAuth Agent.
+func NewAgent(config *config.GitHubOAuthConfig, logger *logrus.Entry) *Agent {
+	return &Agent{
 		gc:     config,
 		logger: logger,
 	}
 }
 
-// HandleLogin handles Github login request from front-end. It starts a new git oauth session and
-// redirect user to Github OAuth end-point for authentication.
-func (ga *GithubOAuthAgent) HandleLogin(client OAuthClient) http.HandlerFunc {
+// HandleLogin handles GitHub login request from front-end. It starts a new git oauth session and
+// redirect user to GitHub OAuth end-point for authentication.
+func (ga *Agent) HandleLogin(client OAuthClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		stateToken := xsrftoken.Generate(ga.gc.ClientSecret, "", "")
 		state := hex.EncodeToString([]byte(stateToken))
@@ -111,9 +114,9 @@ func (ga *GithubOAuthAgent) HandleLogin(client OAuthClient) http.HandlerFunc {
 	}
 }
 
-// HandleLogout handles Github logout request from front-end. It invalidates cookie sessions and
+// HandleLogout handles GitHub logout request from front-end. It invalidates cookie sessions and
 // redirect back to the front page.
-func (ga *GithubOAuthAgent) HandleLogout(client OAuthClient) http.HandlerFunc {
+func (ga *Agent) HandleLogout(client OAuthClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		accessTokenSession, err := ga.gc.CookieStore.Get(r, tokenSession)
 		if err != nil {
@@ -136,10 +139,10 @@ func (ga *GithubOAuthAgent) HandleLogout(client OAuthClient) http.HandlerFunc {
 	}
 }
 
-// HandleRedirect handles the redirection from Github. It exchanges the code from redirect URL for
+// HandleRedirect handles the redirection from GitHub. It exchanges the code from redirect URL for
 // user access token. The access token is then saved to the cookie and the page is redirected to
 // the final destination in the config, which should be the front-end.
-func (ga *GithubOAuthAgent) HandleRedirect(client OAuthClient, getter GithubClientGetter) http.HandlerFunc {
+func (ga *Agent) HandleRedirect(client OAuthClient, getter GitHubClientGetter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		state := r.FormValue("state")
 		stateTokenRaw, err := hex.DecodeString(state)
@@ -203,7 +206,7 @@ func (ga *GithubOAuthAgent) HandleRedirect(client OAuthClient, getter GithubClie
 			ga.serverError(w, "Save session", err)
 			return
 		}
-		ghc := getter.GetGithubClient(token.AccessToken, false)
+		ghc := getter.GetGitHubClient(token.AccessToken, false)
 		user, err := ghc.GetUser("")
 		if err != nil {
 			ga.serverError(w, "Get user login", err)
@@ -221,7 +224,7 @@ func (ga *GithubOAuthAgent) HandleRedirect(client OAuthClient, getter GithubClie
 }
 
 // Handles server errors.
-func (ga *GithubOAuthAgent) serverError(w http.ResponseWriter, action string, err error) {
+func (ga *Agent) serverError(w http.ResponseWriter, action string, err error) {
 	ga.logger.WithError(err).Errorf("Error %s.", action)
 	msg := fmt.Sprintf("500 Internal server error %s: %v", action, err)
 	http.Error(w, msg, http.StatusInternalServerError)

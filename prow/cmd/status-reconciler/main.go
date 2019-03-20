@@ -23,9 +23,11 @@ import (
 	"syscall"
 
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/pjutil"
 
 	"k8s.io/test-infra/pkg/flagutil"
 	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
 	_ "k8s.io/test-infra/prow/hook"
 	"k8s.io/test-infra/prow/logrusutil"
@@ -40,7 +42,7 @@ type options struct {
 
 	continueOnError bool
 	dryRun          bool
-	kubernetes      prowflagutil.KubernetesOptions
+	kubernetes      prowflagutil.ExperimentalKubernetesOptions
 	github          prowflagutil.GitHubOptions
 }
 
@@ -82,14 +84,16 @@ func main() {
 		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "status-reconciler"}),
 	)
 
+	pjutil.ServePProf()
+
 	configAgent := &config.Agent{}
 	if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
 		logrus.WithError(err).Fatal("Error starting config agent.")
 	}
-	changes := make(chan config.ConfigDelta)
+	changes := make(chan config.Delta)
 	configAgent.Subscribe(changes)
 
-	secretAgent := &config.SecretAgent{}
+	secretAgent := &secret.Agent{}
 	if o.github.TokenPath != "" {
 		if err := secretAgent.Start([]string{o.github.TokenPath}); err != nil {
 			logrus.WithError(err).Fatal("Error starting secrets agent.")
@@ -106,7 +110,7 @@ func main() {
 		logrus.WithError(err).Fatal("Error getting GitHub client.")
 	}
 
-	kubeClient, err := o.kubernetes.Client(configAgent.Config().ProwJobNamespace, o.dryRun)
+	prowJobClient, err := o.kubernetes.ProwJobClient(configAgent.Config().ProwJobNamespace, o.dryRun)
 	if err != nil {
 		logrus.WithError(err).Fatal("Error getting kube client.")
 	}
@@ -114,6 +118,6 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
-	c := statusreconciler.NewController(o.continueOnError, kubeClient, githubClient, pluginAgent)
+	c := statusreconciler.NewController(o.continueOnError, prowJobClient, githubClient, configAgent, pluginAgent)
 	c.Run(sig, changes)
 }

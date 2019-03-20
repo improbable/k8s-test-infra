@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("@build_bazel_rules_nodejs//:defs.bzl", "rollup_bundle")
+load("@build_bazel_rules_nodejs//:defs.bzl", "jasmine_node_test", "rollup_bundle")
 load("@build_bazel_rules_typescript//:defs.bzl", "ts_library")
 
 ts_library(
@@ -9,11 +9,52 @@ ts_library(
 )
 
 ts_library(
-    name = "prow",
-    srcs = glob(["prow/*.ts"]) + ["vendor.d.ts"],
+    name = "common",
+    srcs = glob(["common/*.ts"]),
     deps = [
         ":api",
-        "@npm//:moment",
+        "@npm//moment",
+    ],
+)
+
+ts_library(
+    name = "histogram",
+    srcs = glob(["prow/histogram.ts"]),
+    deps = [
+        ":api",
+    ],
+)
+
+ts_library(
+    name = "prow",
+    srcs = glob(
+        ["prow/*.ts"],
+        exclude = ["prow/histogram*.ts"],
+    ) + ["vendor.d.ts"],
+    deps = [
+        ":api",
+        ":common",
+        ":histogram",
+        "@npm//moment",
+    ],
+)
+
+ts_library(
+    name = "prow_test_lib",
+    srcs = ["prow/histogram_test.ts"],
+    deps = [
+        ":histogram",
+        "@npm//@types/jasmine",
+    ],
+)
+
+jasmine_node_test(
+    name = "prow_test",
+    srcs = [
+        ":prow_test_lib",
+    ],
+    deps = [
+        "@npm//jasmine",
     ],
 )
 
@@ -22,7 +63,7 @@ rollup_bundle(
     entry_point = "prow/cmd/deck/static/prow/prow",
     deps = [
         ":prow",
-        "@npm//:moment",
+        "@npm//moment",
     ],
 )
 
@@ -39,7 +80,7 @@ rollup_bundle(
     entry_point = "prow/cmd/deck/static/plugin-help/plugin-help",
     deps = [
         ":plugin_help",
-        "@npm//:dialog-polyfill",
+        "@npm//dialog-polyfill",
     ],
 )
 
@@ -48,6 +89,7 @@ ts_library(
     srcs = glob(["pr/*.ts"]),
     deps = [
         ":api",
+        ":common",
     ],
 )
 
@@ -56,7 +98,8 @@ rollup_bundle(
     entry_point = "prow/cmd/deck/static/pr/pr",
     deps = [
         ":pr",
-        "@npm//:dialog-polyfill",
+        "@npm//dialog-polyfill",
+        "@npm//moment",
     ],
 )
 
@@ -65,6 +108,7 @@ ts_library(
     srcs = glob(["tide/*.ts"]),
     deps = [
         ":api",
+        ":common",
     ],
 )
 
@@ -73,6 +117,26 @@ rollup_bundle(
     entry_point = "prow/cmd/deck/static/tide/tide",
     deps = [
         ":tide",
+        "@npm//moment",
+    ],
+)
+
+ts_library(
+    name = "tide_history",
+    srcs = glob(["tide-history/*.ts"]),
+    deps = [
+        ":api",
+        ":common",
+        "@npm//moment",
+    ],
+)
+
+rollup_bundle(
+    name = "tide_history_bundle",
+    entry_point = "prow/cmd/deck/static/tide-history/tide-history",
+    deps = [
+        ":tide_history",
+        "@npm//moment",
     ],
 )
 
@@ -89,7 +153,7 @@ rollup_bundle(
     entry_point = "prow/cmd/deck/static/command-help/command-help",
     deps = [
         ":command_help",
-        "@npm//:dialog-polyfill",
+        "@npm//dialog-polyfill",
     ],
 )
 
@@ -132,12 +196,32 @@ rollup_bundle(
     ],
 )
 
+test_suite(
+    name = "unit_tests",
+    tests = [
+        ":prow_test",
+    ],
+)
+
+genrule(
+    name = "labels_css",
+    srcs = [
+        "//label_sync:labels.css.tmpl",
+        "//label_sync:labels.yaml",
+    ],
+    outs = ["labels.css"],
+    cmd = "$(location //label_sync) --action=css --css-template=$(location //label_sync:labels.css.tmpl) --config=$(location //label_sync:labels.yaml) --css-output=$@",
+    tools = [
+        "//label_sync",
+    ],
+)
+
 filegroup(
     name = "resources",
     srcs = glob(
         ["**/*"],
         exclude = ["**/*.js"],
-    ) + glob(["extensions/*.js"]),
+    ) + glob(["extensions/*.js"]) + [":labels_css"],
 )
 
 filegroup(
@@ -150,6 +234,7 @@ filegroup(
         ":spyglass_bundle",
         ":spyglass_lens_bundle",
         ":tide_bundle",
+        ":tide_history_bundle",
     ],
 )
 

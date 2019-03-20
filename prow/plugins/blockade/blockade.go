@@ -37,6 +37,7 @@ import (
 )
 
 const (
+	// PluginName defines this plugin's registered name.
 	PluginName = "blockade"
 )
 
@@ -63,7 +64,7 @@ func helpProvider(config *plugins.Configuration, enabledRepos []string) (*plugin
 	blockConfig := map[string]string{}
 	for _, repo := range enabledRepos {
 		parts := strings.Split(repo, "/")
-		if len(parts) != 2 {
+		if len(parts) > 2 {
 			return nil, fmt.Errorf("invalid repo in enabledRepos: %q", repo)
 		}
 		var buf bytes.Buffer

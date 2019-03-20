@@ -51,10 +51,15 @@ func helpProvider(config *plugins.Configuration, enabledRepos []string) (*plugin
 	welcomeConfig := map[string]string{}
 	for _, repo := range enabledRepos {
 		parts := strings.Split(repo, "/")
-		if len(parts) != 2 {
+		var messageTemplate string
+		switch len(parts) {
+		case 1:
+			messageTemplate = welcomeMessageForRepo(config, repo, "")
+		case 2:
+			messageTemplate = welcomeMessageForRepo(config, parts[0], parts[1])
+		default:
 			return nil, fmt.Errorf("invalid repo in enabledRepos: %q", repo)
 		}
-		messageTemplate := welcomeMessageForRepo(config, parts[0], parts[1])
 		welcomeConfig[repo] = fmt.Sprintf("The welcome plugin is configured to post using following welcome template: %s.", messageTemplate)
 	}
 
@@ -141,19 +146,19 @@ func optionsForRepo(config *plugins.Configuration, org, repo string) *plugins.We
 	fullName := fmt.Sprintf("%s/%s", org, repo)
 
 	// First search for repo config
-	for i := range config.Welcome {
-		if !strInSlice(fullName, config.Welcome[i].Repos) {
+	for _, c := range config.Welcome {
+		if !strInSlice(fullName, c.Repos) {
 			continue
 		}
-		return &config.Welcome[i]
+		return &c
 	}
 
 	// If you don't find anything, loop again looking for an org config
-	for i := range config.Welcome {
-		if !strInSlice(org, config.Welcome[i].Repos) {
+	for _, c := range config.Welcome {
+		if !strInSlice(org, c.Repos) {
 			continue
 		}
-		return &config.Welcome[i]
+		return &c
 	}
 
 	// Return an empty config, and default to defaultWelcomeMessage

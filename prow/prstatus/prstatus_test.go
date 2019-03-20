@@ -28,12 +28,10 @@ import (
 
 	"golang.org/x/oauth2"
 
-	gogithub "github.com/google/go-github/github"
 	"github.com/gorilla/sessions"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/yaml"
 
-	"k8s.io/test-infra/pkg/ghclient"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/github"
 )
@@ -47,14 +45,14 @@ func (mh *MockQueryHandler) QueryPullRequests(ctx context.Context, ghc githubCli
 	return mh.prs, nil
 }
 
-func (mh *MockQueryHandler) HeadContexts(ghc githubClient, pr PullRequest) ([]Context, error) {
+func (mh *MockQueryHandler) GetHeadContexts(ghc githubClient, pr PullRequest) ([]Context, error) {
 	return mh.contextMap[int(pr.Number)], nil
 }
 
-func (mh *MockQueryHandler) GetUser(*ghclient.Client) (*gogithub.User, error) {
+func (mh *MockQueryHandler) BotName(*github.Client) (*github.User, error) {
 	login := "random_user"
-	return &gogithub.User{
-		Login: &login,
+	return &github.User{
+		Login: login,
 	}, nil
 }
 
@@ -77,7 +75,7 @@ func newMockQueryHandler(prs []PullRequest, contextMap map[int][]Context) *MockQ
 	}
 }
 
-func createMockAgent(repos []string, config *config.GithubOAuthConfig) *DashboardAgent {
+func createMockAgent(repos []string, config *config.GitHubOAuthConfig) *DashboardAgent {
 	return &DashboardAgent{
 		repos: repos,
 		goac:  config,
@@ -88,7 +86,7 @@ func createMockAgent(repos []string, config *config.GithubOAuthConfig) *Dashboar
 func TestHandlePrStatusWithoutLogin(t *testing.T) {
 	repos := []string{"mock/repo", "kubernetes/test-infra", "foo/bar"}
 	mockCookieStore := sessions.NewCookieStore([]byte("secret-key"))
-	mockConfig := &config.GithubOAuthConfig{
+	mockConfig := &config.GitHubOAuthConfig{
 		CookieStore: mockCookieStore,
 	}
 	mockAgent := createMockAgent(repos, mockConfig)
@@ -124,7 +122,7 @@ func TestHandlePrStatusWithInvalidToken(t *testing.T) {
 	logrus.SetLevel(logrus.ErrorLevel)
 	repos := []string{"mock/repo", "kubernetes/test-infra", "foo/bar"}
 	mockCookieStore := sessions.NewCookieStore([]byte("secret-key"))
-	mockConfig := &config.GithubOAuthConfig{
+	mockConfig := &config.GitHubOAuthConfig{
 		CookieStore: mockCookieStore,
 	}
 	mockAgent := createMockAgent(repos, mockConfig)
@@ -160,7 +158,7 @@ func TestHandlePrStatusWithInvalidToken(t *testing.T) {
 func TestHandlePrStatusWithLogin(t *testing.T) {
 	repos := []string{"mock/repo", "kubernetes/test-infra", "foo/bar"}
 	mockCookieStore := sessions.NewCookieStore([]byte("secret-key"))
-	mockConfig := &config.GithubOAuthConfig{
+	mockConfig := &config.GitHubOAuthConfig{
 		CookieStore: mockCookieStore,
 	}
 	mockAgent := createMockAgent(repos, mockConfig)
@@ -222,7 +220,7 @@ func TestHandlePrStatusWithLogin(t *testing.T) {
 			},
 			expectedData: UserData{
 				Login: true,
-				PullRequestsWithContexts: []PullRequestWithContext{
+				PullRequestsWithContexts: []PullRequestWithContexts{
 					{
 						PullRequest: PullRequest{
 							Number: 0,
@@ -306,10 +304,10 @@ func TestHandlePrStatusWithLogin(t *testing.T) {
 	}
 }
 
-func TestHeadContexts(t *testing.T) {
+func TestGetHeadContexts(t *testing.T) {
 	repos := []string{"mock/repo", "kubernetes/test-infra", "foo/bar"}
 	mockCookieStore := sessions.NewCookieStore([]byte("secret-key"))
-	mockConfig := &config.GithubOAuthConfig{
+	mockConfig := &config.GitHubOAuthConfig{
 		CookieStore: mockCookieStore,
 	}
 	mockAgent := createMockAgent(repos, mockConfig)
@@ -365,7 +363,7 @@ func TestHeadContexts(t *testing.T) {
 	}
 	for id, testcase := range testCases {
 		t.Logf("Test %d:", id)
-		contexts, err := mockAgent.HeadContexts(&fgc{
+		contexts, err := mockAgent.GetHeadContexts(&fgc{
 			combinedStatus: testcase.combinedStatus,
 		}, testcase.pr)
 		if err != nil {
@@ -381,7 +379,7 @@ func TestHeadContexts(t *testing.T) {
 func TestConstructSearchQuery(t *testing.T) {
 	repos := []string{"mock/repo", "kubernetes/test-infra", "foo/bar"}
 	mockCookieStore := sessions.NewCookieStore([]byte("secret-key"))
-	mockConfig := &config.GithubOAuthConfig{
+	mockConfig := &config.GitHubOAuthConfig{
 		CookieStore: mockCookieStore,
 	}
 	mockAgent := createMockAgent(repos, mockConfig)
