@@ -28,9 +28,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/pjutil"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/test-infra/ghproxy/ghcache"
 	"k8s.io/test-infra/greenhouse/diskutil"
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/metrics"
 )
@@ -69,6 +72,8 @@ type options struct {
 	dir    string
 	sizeGB int
 
+	redisAddress string
+
 	port           int
 	upstream       string
 	upstreamParsed *url.URL
@@ -80,6 +85,8 @@ type options struct {
 	pushGatewayInterval time.Duration
 
 	logLevel string
+
+	serveMetrics bool
 }
 
 func (o *options) validate() error {
@@ -104,19 +111,19 @@ func flagOptions() *options {
 	o := &options{}
 	flag.StringVar(&o.dir, "cache-dir", "", "Directory to cache to if using a disk cache.")
 	flag.IntVar(&o.sizeGB, "cache-sizeGB", 0, "Cache size in GB if using a disk cache.")
+	flag.StringVar(&o.redisAddress, "redis-address", "", "Redis address if using a redis cache e.g. localhost:6379.")
 	flag.IntVar(&o.port, "port", 8888, "Port to listen on.")
 	flag.StringVar(&o.upstream, "upstream", "https://api.github.com", "Scheme, host, and base path of reverse proxy upstream.")
 	flag.IntVar(&o.maxConcurrency, "concurrency", 25, "Maximum number of concurrent in-flight requests to GitHub.")
 	flag.StringVar(&o.pushGateway, "push-gateway", "", "If specified, push prometheus metrics to this endpoint.")
 	flag.DurationVar(&o.pushGatewayInterval, "push-gateway-interval", time.Minute, "Interval at which prometheus metrics are pushed.")
 	flag.StringVar(&o.logLevel, "log-level", "debug", fmt.Sprintf("Log level is one of %v.", logrus.AllLevels))
+	flag.BoolVar(&o.serveMetrics, "serve-metrics", false, "If true, it serves prometheus metrics")
 	return o
 }
 
 func main() {
-	logrus.SetFormatter(
-		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "ghproxy"}),
-	)
+	logrusutil.ComponentInit("ghproxy")
 
 	o := flagOptions()
 	flag.Parse()
@@ -125,16 +132,18 @@ func main() {
 	}
 
 	var cache http.RoundTripper
-	if o.dir == "" {
+	if o.redisAddress != "" {
+		cache = ghcache.NewRedisCache(http.DefaultTransport, o.redisAddress, o.maxConcurrency)
+	} else if o.dir == "" {
 		cache = ghcache.NewMemCache(http.DefaultTransport, o.maxConcurrency)
 	} else {
 		cache = ghcache.NewDiskCache(http.DefaultTransport, o.dir, o.sizeGB, o.maxConcurrency)
-	}
-
-	if o.pushGateway != "" {
-		go metrics.PushMetrics("ghproxy", o.pushGateway, o.pushGatewayInterval)
 		go diskMonitor(o.pushGatewayInterval, o.dir)
 	}
+
+	pjutil.ServePProf()
+	metrics.ExposeMetrics("ghproxy", config.PushGateway{
+		Endpoint: o.pushGateway, Interval: &metav1.Duration{Duration: o.pushGatewayInterval}, ServeMetrics: o.serveMetrics})
 
 	proxy := newReverseProxy(o.upstreamParsed, cache, 30*time.Second)
 	logrus.Fatal(http.ListenAndServe(":"+strconv.Itoa(o.port), proxy))

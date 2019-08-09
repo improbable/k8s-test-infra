@@ -31,21 +31,13 @@ import (
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/gcsupload"
 	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pod-utils/decorate"
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
 )
 
-// NewProwJobWithAnnotation initializes a ProwJob out of a ProwJobSpec with annotations.
-func NewProwJobWithAnnotation(spec prowapi.ProwJobSpec, labels, annotations map[string]string) prowapi.ProwJob {
-	return newProwJob(spec, labels, annotations)
-}
-
 // NewProwJob initializes a ProwJob out of a ProwJobSpec.
-func NewProwJob(spec prowapi.ProwJobSpec, labels map[string]string) prowapi.ProwJob {
-	return newProwJob(spec, labels, nil)
-}
-
-func newProwJob(spec prowapi.ProwJobSpec, extraLabels, extraAnnotations map[string]string) prowapi.ProwJob {
+func NewProwJob(spec prowapi.ProwJobSpec, extraLabels, extraAnnotations map[string]string) prowapi.ProwJob {
 	labels, annotations := decorate.LabelsAndAnnotationsForSpec(spec, extraLabels, extraAnnotations)
 
 	return prowapi.ProwJob{
@@ -100,8 +92,12 @@ func NewPresubmit(pr github.PullRequest, baseSHA string, job config.Presubmit, e
 	for k, v := range job.Labels {
 		labels[k] = v
 	}
+	annotations := make(map[string]string)
+	for k, v := range job.Annotations {
+		annotations[k] = v
+	}
 	labels[github.EventGUID] = eventGUID
-	return NewProwJob(PresubmitSpec(job, refs), labels)
+	return NewProwJob(PresubmitSpec(job, refs), labels, annotations)
 }
 
 // PresubmitSpec initializes a ProwJobSpec for a given presubmit job.
@@ -111,6 +107,11 @@ func PresubmitSpec(p config.Presubmit, refs prowapi.Refs) prowapi.ProwJobSpec {
 	pjs.Context = p.Context
 	pjs.Report = !p.SkipReport
 	pjs.RerunCommand = p.RerunCommand
+	if p.JenkinsSpec != nil {
+		pjs.JenkinsSpec = &prowapi.JenkinsSpec{
+			GitHubBranchSourceJob: p.JenkinsSpec.GitHubBranchSourceJob,
+		}
+	}
 	pjs.Refs = completePrimaryRefs(refs, p.JobBase)
 
 	return pjs
@@ -123,6 +124,11 @@ func PostsubmitSpec(p config.Postsubmit, refs prowapi.Refs) prowapi.ProwJobSpec 
 	pjs.Context = p.Context
 	pjs.Report = !p.SkipReport
 	pjs.Refs = completePrimaryRefs(refs, p.JobBase)
+	if p.JenkinsSpec != nil {
+		pjs.JenkinsSpec = &prowapi.JenkinsSpec{
+			GitHubBranchSourceJob: p.JenkinsSpec.GitHubBranchSourceJob,
+		}
+	}
 
 	return pjs
 }
@@ -150,6 +156,10 @@ func specFromJobBase(jb config.JobBase) prowapi.ProwJobSpec {
 	if jb.Namespace != nil {
 		namespace = *jb.Namespace
 	}
+	var rerunAuthConfig prowapi.RerunAuthConfig
+	if jb.RerunAuthConfig != nil {
+		rerunAuthConfig = *jb.RerunAuthConfig
+	}
 	return prowapi.ProwJobSpec{
 		Job:             jb.Name,
 		Agent:           prowapi.ProwJobAgent(jb.Agent),
@@ -161,8 +171,12 @@ func specFromJobBase(jb config.JobBase) prowapi.ProwJobSpec {
 		ExtraRefs:        jb.ExtraRefs,
 		DecorationConfig: jb.DecorationConfig,
 
-		PodSpec:   jb.Spec,
-		BuildSpec: jb.BuildSpec,
+		PodSpec:         jb.Spec,
+		BuildSpec:       jb.BuildSpec,
+		PipelineRunSpec: jb.PipelineRunSpec,
+
+		ReporterConfig:  jb.ReporterConfig,
+		RerunAuthConfig: rerunAuthConfig,
 	}
 }
 
@@ -174,6 +188,7 @@ func completePrimaryRefs(refs prowapi.Refs, jb config.JobBase) *prowapi.Refs {
 		refs.CloneURI = jb.CloneURI
 	}
 	refs.SkipSubmodules = jb.SkipSubmodules
+	refs.CloneDepth = jb.CloneDepth
 	return &refs
 }
 
@@ -240,6 +255,10 @@ func ProwJobFields(pj *prowapi.ProwJob) logrus.Fields {
 		fields[github.RepoLogField] = pj.Spec.Refs.Repo
 		fields[github.OrgLogField] = pj.Spec.Refs.Org
 	}
+	if pj.Spec.JenkinsSpec != nil {
+		fields["github_based_job"] = pj.Spec.JenkinsSpec.GitHubBranchSourceJob
+	}
+
 	return fields
 }
 
@@ -263,4 +282,12 @@ func JobURL(plank config.Plank, pj prowapi.ProwJob, log *logrus.Entry) string {
 		return b.String()
 	}
 	return ""
+}
+
+// ClusterToCtx converts the prow job's cluster to a cluster context
+func ClusterToCtx(cluster string) string {
+	if cluster == kube.InClusterContext {
+		return kube.DefaultClusterAlias
+	}
+	return cluster
 }

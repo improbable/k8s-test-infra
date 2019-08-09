@@ -11,6 +11,7 @@ go_test(
     srcs = [
         "client_test.go",
         "config_test.go",
+        "metrics_test.go",
         "prowjob_test.go",
     ],
     embed = [":go_default_library"],
@@ -33,7 +34,6 @@ go_library(
         "metrics.go",
         "prowjob.go",
         "ratelimiter.go",
-        "types.go",
     ],
     importpath = "k8s.io/test-infra/prow/kube",
     deps = [
@@ -47,7 +47,6 @@ go_library(
         "//vendor/k8s.io/apimachinery/pkg/api/errors:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/util/sets:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/watch:go_default_library",
         "//vendor/k8s.io/client-go/kubernetes:go_default_library",
         "//vendor/k8s.io/client-go/plugin/pkg/client/auth:go_default_library",

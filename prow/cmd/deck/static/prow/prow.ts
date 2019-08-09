@@ -1,18 +1,15 @@
 import moment from "moment";
 import {Job, JobState, JobType} from "../api/prow";
-import {cell, icon} from "../common/common";
+import {cell, getCookieByName, icon} from "../common/common";
+import {getParameterByName} from "../common/urls";
 import {FuzzySearch} from './fuzzy-search';
 import {JobHistogram, JobSample} from './histogram';
 
 declare const allBuilds: Job[];
 declare const spyglass: boolean;
-
-// http://stackoverflow.com/a/5158301/3694
-function getParameterByName(name: string): string | null {
-    const match = RegExp(`[?&]${name}=([^&/]*)`).exec(
-        window.location.search);
-    return match && decodeURIComponent(match[1].replace(/\+/g, ' '));
-}
+declare const rerunCreatesJob: boolean;
+declare const csrfToken: string;
+declare const allowAnyone: boolean;
 
 function shortenBuildRefs(buildRef: string): string {
     return buildRef && buildRef.replace(/:[0-9a-f]*/g, '');
@@ -359,7 +356,7 @@ function addOptionFuzzySearch(fz: FuzzySearch, data: string[], id: string,
     }
 }
 
-function addOptions(options: string[], selectID: string): string | null {
+function addOptions(options: string[], selectID: string): string | undefined {
     const sel = document.getElementById(selectID)! as HTMLSelectElement;
     while (sel.length > 1) {
         sel.removeChild(sel.lastChild!);
@@ -397,6 +394,7 @@ function escapeRegexLiteral(s: string): string {
 }
 
 function redraw(fz: FuzzySearch): void {
+    const rerunStatus = getParameterByName("rerun");
     const modal = document.getElementById('rerun')!;
     const rerunCommand = document.getElementById('rerun-content')!;
     window.onclick = (event) => {
@@ -463,6 +461,8 @@ function redraw(fz: FuzzySearch): void {
 
     let lastKey = '';
     const jobCountMap = new Map() as Map<JobState, number>;
+    const jobInterval: Array<[number, number]> = [[3600 * 3, 0], [3600 * 12, 0], [3600 * 48, 0]];
+    let currentInterval = 0;
     const jobHistogram = new JobHistogram();
     const now = moment().unix();
     let totalJob = 0;
@@ -500,15 +500,39 @@ function redraw(fz: FuzzySearch): void {
         }
 
         if (!jobCountMap.has(build.state)) {
-          jobCountMap.set(build.state, 0);
+            jobCountMap.set(build.state, 0);
         }
         totalJob++;
         jobCountMap.set(build.state, jobCountMap.get(build.state)! + 1);
+
+        // accumulate a count of the percentage of successful jobs over each interval
+        const started = Number(build.started);
+        if (currentInterval >= 0 && (now - started) > jobInterval[currentInterval][0]) {
+            let successCount = jobCountMap.get("success");
+            if (!successCount) {
+                successCount = 0;
+            }
+            let failureCount = jobCountMap.get("failure");
+            if (!failureCount) {
+                failureCount = 0;
+            }
+            const total = successCount + failureCount;
+            if (total > 0) {
+                jobInterval[currentInterval][1] = successCount / total;
+            } else {
+                jobInterval[currentInterval][1] = 0;
+            }
+            currentInterval++;
+            if (currentInterval >= jobInterval.length) {
+                currentInterval = -1;
+            }
+        }
+
         if (displayedJob >= 500) {
-            jobHistogram.add(new JobSample(Number(build.started), parseDuration(build.duration), build.state, -1));
+            jobHistogram.add(new JobSample(started, parseDuration(build.duration), build.state, -1));
             continue;
         } else {
-            jobHistogram.add(new JobSample(Number(build.started), parseDuration(build.duration), build.state, builds.childElementCount));
+            jobHistogram.add(new JobSample(started, parseDuration(build.duration), build.state, builds.childElementCount));
         }
         displayedJob++;
         const r = document.createElement("tr");
@@ -524,6 +548,7 @@ function redraw(fz: FuzzySearch): void {
             r.appendChild(cell.text(""));
         }
         r.appendChild(createRerunCell(modal, rerunCommand, build.prow_job));
+        r.appendChild(createViewJobCell(build.prow_job));
         const key = groupKey(build);
         if (key !== lastKey) {
             // This is a different PR or commit than the previous row.
@@ -581,16 +606,60 @@ function redraw(fz: FuzzySearch): void {
         r.appendChild(cell.text(build.duration));
         builds.appendChild(r);
     }
+
+    // fill out the remaining intervals if necessary
+    if (currentInterval !== -1) {
+        let successCount = jobCountMap.get("success");
+        if (!successCount) {
+            successCount = 0;
+        }
+        let failureCount = jobCountMap.get("failure");
+        if (!failureCount) {
+            failureCount = 0;
+        }
+        const total = successCount + failureCount;
+        for (let i = currentInterval; i < jobInterval.length; i++) {
+            if (total > 0) {
+                jobInterval[i][1] = successCount / total;
+            } else {
+                jobInterval[i][1] = 0;
+            }
+        }
+    }
+
+    const jobSummary = document.getElementById("job-histogram-summary")!;
+    const success = jobInterval.map((interval) => {
+        if (interval[1] < 0.5) {
+            return `${formatDuration(interval[0])}: <span class="state failure">${Math.ceil(interval[1] * 100)}%</span>`;
+        }
+        return `${formatDuration(interval[0])}: <span class="state success">${Math.ceil(interval[1] * 100)}%</span>`;
+    }).join(", ");
+    jobSummary.innerHTML = `Success rate over time: ${success}`;
     const jobCount = document.getElementById("job-count")!;
     jobCount.textContent = `Showing ${displayedJob}/${totalJob} jobs`;
     drawJobBar(totalJob, jobCountMap);
-    drawJobHistogram(totalJob, jobHistogram, now - (12 * 3600), now);
+
+    // if we aren't filtering the output, cap the histogram y axis to 2 hours because it
+    // contains the bulk of our jobs
+    let max = Number.MAX_SAFE_INTEGER;
+    if (totalJob === allBuilds.length) {
+        max = 2 * 3600;
+    }
+    drawJobHistogram(totalJob, jobHistogram, now - (12 * 3600), now, max);
+    if (rerunStatus === "gh_redirect") {
+        modal.style.display = "block";
+        rerunCommand.innerHTML = "Rerunning that job requires GitHub login. Now that you're logged in, try again";
+    }
 }
 
 function createRerunCell(modal: HTMLElement, rerunElement: HTMLElement, prowjob: string): HTMLTableDataCellElement {
-    const url = `https://${window.location.hostname}/rerun?prowjob=${prowjob}`;
+    const url = `${location.protocol}//${location.host}/rerun?prowjob=${prowjob}`;
     const c = document.createElement("td");
     const i = icon.create("refresh", "Show instructions for rerunning this job");
+
+    // we actually want to know whether the "access-token-session" cookie exists, but we can't always
+    // access it from the frontend. "github_login" should be set whenever "access-token-session" is
+    const login = getCookieByName("github_login");
     i.onclick = () => {
         modal.style.display = "block";
         rerunElement.innerHTML = `kubectl create -f "<a href="${url}">${url}</a>"`;
@@ -599,9 +668,46 @@ function createRerunCell(modal: HTMLElement, rerunElement: HTMLElement, prowjob:
         copyButton.onclick = () => copyToClipboardWithToast(`kubectl create -f "${url}"`);
         copyButton.innerHTML = "<i class='material-icons state triggered' style='color: gray'>file_copy</i>";
         rerunElement.appendChild(copyButton);
+        if (rerunCreatesJob) {
+            const runButton = document.createElement('a');
+            runButton.innerHTML = "<button class='mdl-button mdl-js-button'>Rerun</button>";
+            if (login === "" && !allowAnyone) {
+                runButton.href = `/github-login?dest=%2F?rerun=gh_redirect`;
+            } else {
+                runButton.onclick = async () => {
+                    gtag("event", "rerun", {
+                        event_category: "engagement",
+                        transport_type: "beacon",
+                    });
+                    const result = await fetch(url, {
+                        headers: {
+                            "Content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                            "X-CSRF-Token": csrfToken,
+                        },
+                        method: 'post',
+                    });
+                    const data = await result.text();
+                    if (result.status === 401) {
+                        window.location.href = window.location.origin + "/github-login?dest=%2F?rerun=gh_redirect";
+                    } else {
+                        rerunElement.innerHTML = data;
+                    }
+                };
+            }
+            rerunElement.appendChild(runButton);
+        }
     };
     c.appendChild(i);
     c.classList.add("icon-cell");
+    return c;
+}
+
+function createViewJobCell(prowjob: string): HTMLTableDataCellElement {
+    const c = document.createElement("td");
+    const i = icon.create("pageview", "Show job YAML", () => gtag("event", "view_job_yaml", {event_category: "engagement", transport_type: "beacon"}));
+    i.href = `/prowjob?prowjob=${prowjob}`;
+    c.classList.add("icon-cell");
+    c.appendChild(i);
     return c;
 }
 
@@ -646,8 +752,8 @@ function batchRevisionCell(build: Job): HTMLTableDataCellElement {
     if (!build.refs.pulls) {
         return c;
     }
-    for (let i = 1; i < build.refs.pulls.length; i++) {
-        if (i !== 1) {
+    for (let i = 0; i < build.refs.pulls.length; i++) {
+        if (i !== 0) {
             c.appendChild(document.createTextNode(", "));
         }
         const l = document.createElement("a");
@@ -729,13 +835,13 @@ function parseDuration(duration: string): number {
 
 function formatDuration(seconds: number): string {
     const parts: string[] = [];
-    if (seconds > 3600) {
+    if (seconds >= 3600) {
         const hours = Math.floor(seconds / 3600);
         parts.push(String(hours));
         parts.push('h');
         seconds = seconds % 3600;
     }
-    if (seconds > 60) {
+    if (seconds >= 60) {
         const minutes = Math.floor(seconds / 60);
         if (minutes > 0) {
             parts.push(String(minutes));
@@ -750,7 +856,7 @@ function formatDuration(seconds: number): string {
     return parts.join('');
 }
 
-function drawJobHistogram(total: number, jobHistogram: JobHistogram, start: number, end: number): void {
+function drawJobHistogram(total: number, jobHistogram: JobHistogram, start: number, end: number, maximum: number): void {
     const startEl = document.getElementById("job-histogram-start") as HTMLSpanElement;
     if (startEl != null) {
         startEl.textContent = `${formatDuration(end - start)} ago`;
@@ -786,8 +892,18 @@ function drawJobHistogram(total: number, jobHistogram: JobHistogram, start: numb
         }
     }
 
-    // populate the buckets
     const buckets = jobHistogram.buckets(start, end, cols);
+    buckets.limitMaximum(maximum);
+
+    // show the max and mid y-axis labels rounded up to the nearest 10 minute mark
+    let maxY = buckets.max;
+    maxY = Math.ceil(maxY / 600);
+    const yMax = document.getElementById("job-histogram-labels-y-max") as HTMLSpanElement;
+    yMax.innerText = `${formatDuration(maxY * 600)}+`;
+    const yMid = document.getElementById("job-histogram-labels-y-mid") as HTMLSpanElement;
+    yMid.innerText = `${formatDuration(maxY / 2 * 600)}`;
+
+    // populate the buckets
     buckets.data.forEach((bucket, colIndex) => {
         let lastRowIndex = 0;
         buckets.linearChunks(bucket, rows).forEach((samples, rowIndex) =>  {

@@ -26,8 +26,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"k8s.io/test-infra/prow/bugzilla"
 
 	"k8s.io/test-infra/pkg/flagutil"
 	"k8s.io/test-infra/prow/config"
@@ -36,8 +36,10 @@ import (
 	"k8s.io/test-infra/prow/hook"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/metrics"
+	"k8s.io/test-infra/prow/pjutil"
 	pluginhelp "k8s.io/test-infra/prow/pluginhelp/hook"
 	"k8s.io/test-infra/prow/plugins"
+	bzplugin "k8s.io/test-infra/prow/plugins/bugzilla"
 	"k8s.io/test-infra/prow/repoowners"
 	"k8s.io/test-infra/prow/slack"
 )
@@ -53,13 +55,14 @@ type options struct {
 	gracePeriod time.Duration
 	kubernetes  prowflagutil.ExperimentalKubernetesOptions
 	github      prowflagutil.GitHubOptions
+	bugzilla    prowflagutil.BugzillaOptions
 
 	webhookSecretFile string
 	slackTokenFile    string
 }
 
 func (o *options) Validate() error {
-	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github} {
+	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github, &o.bugzilla} {
 		if err := group.Validate(o.dryRun); err != nil {
 			return err
 		}
@@ -68,33 +71,34 @@ func (o *options) Validate() error {
 	return nil
 }
 
-func gatherOptions() options {
-	o := options{}
-	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+func gatherOptions(fs *flag.FlagSet, args ...string) options {
+	var o options
 	fs.IntVar(&o.port, "port", 8888, "Port to listen on.")
 
-	fs.StringVar(&o.configPath, "config-path", "/etc/config/config.yaml", "Path to config.yaml.")
+	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
 	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
 	fs.StringVar(&o.pluginConfig, "plugin-config", "/etc/plugins/plugins.yaml", "Path to plugin config file.")
 
 	fs.BoolVar(&o.dryRun, "dry-run", true, "Dry run for testing. Uses API tokens but does not mutate.")
 	fs.DurationVar(&o.gracePeriod, "grace-period", 180*time.Second, "On shutdown, try to handle remaining events for the specified duration. ")
-	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github} {
+	for _, group := range []flagutil.OptionGroup{&o.kubernetes, &o.github, &o.bugzilla} {
 		group.AddFlags(fs)
 	}
 
 	fs.StringVar(&o.webhookSecretFile, "hmac-secret-file", "/etc/webhook/hmac", "Path to the file containing the GitHub HMAC secret.")
 	fs.StringVar(&o.slackTokenFile, "slack-token-file", "", "Path to the file containing the Slack token to use.")
-	fs.Parse(os.Args[1:])
+	fs.Parse(args)
+	o.configPath = config.ConfigPath(o.configPath)
 	return o
 }
 
 func main() {
-	o := gatherOptions()
+	logrusutil.ComponentInit("hook")
+
+	o := gatherOptions(flag.NewFlagSet(os.Args[0], flag.ExitOnError), os.Args[1:]...)
 	if err := o.Validate(); err != nil {
-		logrus.Fatalf("Invalid options: %v", err)
+		logrus.WithError(err).Fatal("Invalid options")
 	}
-	logrus.SetFormatter(logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "hook"}))
 
 	configAgent := &config.Agent{}
 	if err := configAgent.Start(o.configPath, o.jobConfigPath); err != nil {
@@ -112,9 +116,18 @@ func main() {
 		tokens = append(tokens, o.slackTokenFile)
 	}
 
+	if o.bugzilla.ApiKeyPath != "" {
+		tokens = append(tokens, o.bugzilla.ApiKeyPath)
+	}
+
 	secretAgent := &secret.Agent{}
 	if err := secretAgent.Start(tokens); err != nil {
 		logrus.WithError(err).Fatal("Error starting secrets agent.")
+	}
+
+	pluginAgent := &plugins.ConfigAgent{}
+	if err := pluginAgent.Start(o.pluginConfig); err != nil {
+		logrus.WithError(err).Fatal("Error starting plugins.")
 	}
 
 	githubClient, err := o.github.GitHubClient(secretAgent, o.dryRun)
@@ -126,6 +139,15 @@ func main() {
 		logrus.WithError(err).Fatal("Error getting Git client.")
 	}
 	defer gitClient.Clean()
+
+	var bugzillaClient bugzilla.Client
+	if orgs, repos := pluginAgent.Config().EnabledReposForPlugin(bzplugin.PluginName); orgs != nil || repos != nil {
+		client, err := o.bugzilla.BugzillaClient(secretAgent)
+		if err != nil {
+			logrus.WithError(err).Fatal("Error getting Bugzilla client.")
+		}
+		bugzillaClient = client
+	}
 
 	infrastructureClient, err := o.kubernetes.InfrastructureClusterClient(o.dryRun)
 	if err != nil {
@@ -147,11 +169,6 @@ func main() {
 		slackClient = slack.NewFakeClient()
 	}
 
-	pluginAgent := &plugins.ConfigAgent{}
-	if err := pluginAgent.Start(o.pluginConfig); err != nil {
-		logrus.WithError(err).Fatal("Error starting plugins.")
-	}
-
 	mdYAMLEnabled := func(org, repo string) bool {
 		return pluginAgent.Config().MDYAMLEnabled(org, repo)
 	}
@@ -170,15 +187,13 @@ func main() {
 		GitClient:        gitClient,
 		SlackClient:      slackClient,
 		OwnersClient:     ownersClient,
+		BugzillaClient:   bugzillaClient,
 	}
 
 	promMetrics := hook.NewMetrics()
 
-	// Push metrics to the configured prometheus pushgateway endpoint.
-	pushGateway := configAgent.Config().PushGateway
-	if pushGateway.Endpoint != "" {
-		go metrics.PushMetrics("hook", pushGateway.Endpoint, pushGateway.Interval)
-	}
+	// Expose prometheus metrics
+	metrics.ExposeMetrics("hook", configAgent.Config().PushGateway)
 
 	server := &hook.Server{
 		ClientAgent:    clientAgent,
@@ -189,15 +204,20 @@ func main() {
 	}
 	defer server.GracefulShutdown()
 
+	health := pjutil.NewHealth()
+
+	// TODO remove this health endpoint when the migration to health endpoint is done
 	// Return 200 on / for health checks.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {})
-	http.Handle("/metrics", promhttp.Handler())
+
 	// For /hook, handle a webhook normally.
 	http.Handle("/hook", server)
 	// Serve plugin help information from /plugin-help.
 	http.Handle("/plugin-help", pluginhelp.NewHelpAgent(pluginAgent, githubClient))
 
 	httpServer := &http.Server{Addr: ":" + strconv.Itoa(o.port)}
+
+	health.ServeReady()
 
 	// Shutdown gracefully on SIGTERM or SIGINT
 	sig := make(chan os.Signal, 1)

@@ -115,23 +115,20 @@ func helpProvider(config *plugins.Configuration, enabledRepos []string) (*plugin
 // optionsForRepo gets the plugins.Lgtm struct that is applicable to the indicated repo.
 func optionsForRepo(config *plugins.Configuration, org, repo string) *plugins.Lgtm {
 	fullName := fmt.Sprintf("%s/%s", org, repo)
-	for i := range config.Lgtm {
-		if !strInSlice(org, config.Lgtm[i].Repos) && !strInSlice(fullName, config.Lgtm[i].Repos) {
+	for _, c := range config.Lgtm {
+		if !sets.NewString(c.Repos...).Has(fullName) {
 			continue
 		}
-		return &config.Lgtm[i]
+		return &c
+	}
+	// If you don't find anything, loop again looking for an org config
+	for _, c := range config.Lgtm {
+		if !sets.NewString(c.Repos...).Has(org) {
+			continue
+		}
+		return &c
 	}
 	return &plugins.Lgtm{}
-}
-
-// strInSlice returns true if any string in slice matches str exactly
-func strInSlice(str string, slice []string) bool {
-	for _, elem := range slice {
-		if elem == str {
-			return true
-		}
-	}
-	return false
 }
 
 type githubClient interface {
@@ -232,6 +229,11 @@ func handlePullRequestReview(gc githubClient, config *plugins.Configuration, own
 		htmlURL:     e.Review.HTMLURL,
 	}
 
+	// Only react to reviews that are being submitted (not editted or dismissed).
+	if e.Action != github.ReviewActionSubmitted {
+		return nil
+	}
+
 	// If the review event body contains an '/lgtm' or '/lgtm cancel' comment,
 	// skip handling the review event
 	if lgtmRe.MatchString(rc.body) || lgtmCancelRe.MatchString(rc.body) {
@@ -288,23 +290,27 @@ func handle(wantLGTM bool, config *plugins.Configuration, ownersClient repoowner
 	// check if skip collaborators is enabled for this org/repo
 	skipCollaborators := skipCollaborators(config, org, repoName)
 
+	// check if the commentor is a collaborator
+	isCollaborator, err := gc.IsCollaborator(org, repoName, author)
+	if err != nil {
+		log.WithError(err).Error("Failed to check if author is a collaborator.")
+		return err // abort if we can't determine if commentor is a collaborator
+	}
+
+	// if commentor isn't a collaborator, and we care about collaborators, abort
+	if !isAuthor && !skipCollaborators && !isCollaborator {
+		resp := "changing LGTM is restricted to collaborators"
+		log.Infof("Reply to /lgtm request with comment: \"%s\"", resp)
+		return gc.CreateComment(org, repoName, number, plugins.FormatResponseRaw(body, htmlURL, author, resp))
+	}
+
 	// either ensure that the commentor is a collaborator or an approver/reviwer
 	if !isAuthor && !isAssignee && !skipCollaborators {
 		// in this case we need to ensure the commentor is assignable to the PR
 		// by assigning them
 		log.Infof("Assigning %s/%s#%d to %s", org, repoName, number, author)
 		if err := gc.AssignIssue(org, repoName, number, []string{author}); err != nil {
-			msg := "assigning you to the PR failed"
-			if ok, merr := gc.IsCollaborator(org, repoName, author); merr == nil && !ok {
-				msg = fmt.Sprintf("only %s/%s repo collaborators may be assigned issues", org, repoName)
-			} else if merr != nil {
-				log.WithError(merr).Error("Failed to check if author is a collaborator.")
-			} else {
-				log.WithError(err).Error("Failed to assign issue to author.")
-			}
-			resp := "changing LGTM is restricted to assignees, and " + msg + "."
-			log.Infof("Reply to assign via /lgtm request with comment: \"%s\"", resp)
-			return gc.CreateComment(org, repoName, number, plugins.FormatResponseRaw(body, htmlURL, author, resp))
+			log.WithError(err).Errorf("Failed to assign %s/%s#%d to %s", org, repoName, number, author)
 		}
 	} else if !isAuthor && skipCollaborators {
 		// in this case we depend on OWNERS files instead to check if the author

@@ -36,6 +36,7 @@ func normalize(policy *Policy) {
 		return
 	}
 	sort.Strings(policy.RequiredStatusChecks.Contexts)
+	sort.Strings(policy.Exclude)
 }
 
 func TestSelectBool(t *testing.T) {
@@ -269,6 +270,18 @@ func TestApply(test *testing.T) {
 				Protect: &t,
 			},
 		},
+		{
+			name: "merge exclusion strings",
+			child: Policy{
+				Exclude: []string{"foo*"},
+			},
+			parent: Policy{
+				Exclude: []string{"bar*"},
+			},
+			expected: Policy{
+				Exclude: []string{"bar*", "foo*"},
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -278,10 +291,7 @@ func TestApply(test *testing.T) {
 					test.Errorf("unexpected panic: %s", r)
 				}
 			}()
-			actual, err := tc.parent.Apply(tc.child)
-			if err != nil {
-				test.Fatalf("unexpected error: %v", err)
-			}
+			actual := tc.parent.Apply(tc.child)
 			normalize(&actual)
 			normalize(&tc.expected)
 			if !reflect.DeepEqual(actual, tc.expected) {
@@ -386,11 +396,10 @@ func TestBranchRequirements(t *testing.T) {
 
 func TestConfig_GetBranchProtection(t *testing.T) {
 	testCases := []struct {
-		name              string
-		config            Config
-		org, repo, branch string
-		err               bool
-		expected          *Policy
+		name     string
+		config   Config
+		err      bool
+		expected *Policy
 	}{
 		{
 			name: "unprotected by default",
@@ -759,6 +768,44 @@ func TestConfig_GetBranchProtection(t *testing.T) {
 				},
 			},
 			expected: &Policy{Protect: yes},
+		},
+		{
+			name: "Explicit non-configuration takes precedence over ProtectTested",
+			config: Config{
+				ProwConfig: ProwConfig{
+					BranchProtection: BranchProtection{
+						AllowDisabledJobPolicies: true,
+						ProtectTested:            true,
+						Orgs: map[string]Org{
+							"org": {
+								Repos: map[string]Repo{
+									"repo": {
+										Policy: Policy{
+											Protect: no,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				JobConfig: JobConfig{
+					Presubmits: map[string][]Presubmit{
+						"org/repo": {
+							{
+								JobBase: JobBase{
+									Name: "required presubmit",
+								},
+								Reporter: Reporter{
+									Context: "required presubmit",
+								},
+								AlwaysRun: true,
+							},
+						},
+					},
+				},
+			},
+			expected: nil,
 		},
 	}
 

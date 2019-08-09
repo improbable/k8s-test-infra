@@ -27,16 +27,22 @@ package ghcache
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/gomodule/redigo/redis"
 	"github.com/gregjones/httpcache"
 	"github.com/gregjones/httpcache/diskcache"
+	rediscache "github.com/gregjones/httpcache/redis"
 	"github.com/peterbourgon/diskv"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
+	"k8s.io/test-infra/ghproxy/ghmetrics"
 )
 
 type CacheResponseMode string
@@ -152,12 +158,26 @@ type upstreamTransport struct {
 
 func (u upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	etag := req.Header.Get("if-none-match")
+
+	// get authorization header to convert to sha256
+	authHeader := req.Header.Get("Authorization")
+	if authHeader == "" {
+		logrus.Warn("Couldn't retrieve 'Authorization' header, adding to unknown bucket")
+		authHeader = "unknown"
+	}
+	hasher := sha256.New()
+	hasher.Write([]byte(authHeader))
+	authHeaderHash := fmt.Sprintf("%x", hasher.Sum(nil)) // use %x to make this a utf-8 string for use as a label
+
+	reqStartTime := time.Now()
 	// Don't modify request, just pass to delegate.
 	resp, err := u.delegate.RoundTrip(req)
 	if err != nil {
 		logrus.WithField("cache-key", req.URL.String()).WithError(err).Error("Error from upstream (GitHub).")
 		return nil, err
 	}
+	responseTime := time.Now()
+	roundTripTime := responseTime.Sub(reqStartTime)
 
 	if resp.StatusCode >= 400 {
 		// Don't store errors. They can't be revalidated to save API tokens.
@@ -168,6 +188,15 @@ func (u upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if etag != "" {
 		resp.Header.Set("X-Conditional-Request", etag)
 	}
+
+	apiVersion := "v3"
+	if strings.HasPrefix(req.URL.Path, "graphql") || strings.HasPrefix(req.URL.Path, "/graphql") {
+		apiVersion = "v4"
+	}
+
+	ghmetrics.CollectGitHubTokenMetrics(authHeaderHash, apiVersion, resp.Header, reqStartTime, responseTime)
+	ghmetrics.CollectGitHubRequestMetrics(authHeaderHash, req.URL.Path, string(resp.StatusCode), roundTripTime.Seconds())
+
 	return resp, nil
 }
 
@@ -199,4 +228,14 @@ func NewFromCache(delegate http.RoundTripper, cache httpcache.Cache, maxConcurre
 		keys:     make(map[string]*responseWaiter),
 		delegate: cacheTransport,
 	}
+}
+
+// NewRedisCache creates a GitHub cache RoundTripper that is backed by a Redis
+// cache.
+func NewRedisCache(delegate http.RoundTripper, redisAddress string, maxConcurrency int) http.RoundTripper {
+	conn, err := redis.Dial("tcp", redisAddress)
+	if err != nil {
+		logrus.WithError(err).Fatal("Error connecting to Redis")
+	}
+	return NewFromCache(delegate, rediscache.NewWithClient(conn), maxConcurrency)
 }

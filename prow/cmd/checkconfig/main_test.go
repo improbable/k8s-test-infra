@@ -17,11 +17,19 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"reflect"
+	"regexp"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/yaml"
+
+	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/flagutil"
+	"k8s.io/test-infra/prow/github"
+	"k8s.io/test-infra/prow/plugins"
 )
 
 func TestEnsureValidConfiguration(t *testing.T) {
@@ -353,6 +361,660 @@ func TestOrgRepoUnion(t *testing.T) {
 			got := tc.a.union(tc.b)
 			if !reflect.DeepEqual(got, tc.expected) {
 				t.Errorf("%s: did not get expected config:\n%v", tc.name, diff.ObjectGoPrintDiff(tc.expected, got))
+			}
+		})
+	}
+}
+
+func TestValidateUnknownFields(t *testing.T) {
+	testCases := []struct {
+		name, filename string
+		cfg            interface{}
+		configBytes    []byte
+		config         interface{}
+		expectedErr    error
+	}{
+		{
+			name:     "valid config",
+			filename: "valid-conf.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`plugins:
+  kube/kube:
+  - size
+  - config-updater
+config_updater:
+  maps:
+    # Update the plugins configmap whenever plugins.yaml changes
+    kube/plugins.yaml:
+      name: plugins
+size:
+  s: 1`),
+			expectedErr: nil,
+		},
+		{
+			name:     "invalid top-level property",
+			filename: "toplvl.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`plugins:
+  kube/kube:
+  - size
+  - config-updater
+notconfig_updater:
+  maps:
+    # Update the plugins configmap whenever plugins.yaml changes
+    kube/plugins.yaml:
+      name: plugins
+size:
+  s: 1`),
+			expectedErr: fmt.Errorf("unknown fields present in toplvl.yaml: notconfig_updater"),
+		},
+		{
+			name:     "invalid second-level property",
+			filename: "seclvl.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`plugins:
+  kube/kube:
+  - size
+  - config-updater
+size:
+  xs: 1
+  s: 5`),
+			expectedErr: fmt.Errorf("unknown fields present in seclvl.yaml: size.xs"),
+		},
+		{
+			name:     "invalid array element",
+			filename: "home/array.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`plugins:
+  kube/kube:
+  - size
+  - trigger
+triggers:
+- repos:
+  - kube/kube
+- repoz:
+  - kube/kubez`),
+			expectedErr: fmt.Errorf("unknown fields present in home/array.yaml: triggers[1].repoz"),
+		},
+		{
+			name:     "invalid map entry",
+			filename: "map.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`plugins:
+  kube/kube:
+  - size
+  - config-updater
+config_updater:
+  maps:
+    # Update the plugins configmap whenever plugins.yaml changes
+    kube/plugins.yaml:
+      name: plugins
+    kube/config.yaml:
+      validation: config
+size:
+  s: 1`),
+			expectedErr: fmt.Errorf("unknown fields present in map.yaml: " +
+				"config_updater.maps.kube/config.yaml.validation"),
+		},
+		{
+			name:     "multiple invalid elements",
+			filename: "multiple.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`plugins:
+  kube/kube:
+  - size
+  - trigger
+triggers:
+- repoz:
+  - kube/kubez
+- repos:
+  - kube/kube
+size:
+  s: 1
+  xs: 1`),
+			expectedErr: fmt.Errorf("unknown fields present in multiple.yaml: " +
+				"size.xs, triggers[0].repoz"),
+		},
+		{
+			name:     "embedded structs",
+			filename: "embedded.yaml",
+			cfg:      &config.Config{},
+			configBytes: []byte(`presubmits:
+  kube/kube:
+  - name: test-presubmit
+    decorate: true
+    always_run: true
+    never_run: false
+    skip_report: true
+    spec:
+      containers:
+      - image: alpine
+        command: ["/bin/printenv"]
+tide:
+  squash_label: sq
+  not-a-property: true
+size:
+  s: 1
+  xs: 1`),
+			expectedErr: fmt.Errorf("unknown fields present in embedded.yaml: " +
+				"presubmits.kube/kube[0].never_run, size, tide.not-a-property"),
+		},
+		{
+			name:     "pointer to a slice",
+			filename: "pointer.yaml",
+			cfg:      &plugins.Configuration{},
+			configBytes: []byte(`bugzilla:
+  default:
+    '*':
+      statuses:
+      - foobar
+      extra: oops`),
+			expectedErr: fmt.Errorf("unknown fields present in pointer.yaml: " +
+				"bugzilla.default.*.extra"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := yaml.Unmarshal(tc.configBytes, tc.cfg); err != nil {
+				t.Fatalf("Unable to unmarhsal yaml: %v", err)
+			}
+			got := validateUnknownFields(tc.cfg, tc.configBytes, tc.filename)
+			if !reflect.DeepEqual(got, tc.expectedErr) {
+				t.Errorf("%s: did not get expected validation error:\n%v", tc.name,
+					diff.ObjectGoPrintDiff(tc.expectedErr, got))
+			}
+		})
+	}
+}
+
+func TestValidateStrictBranches(t *testing.T) {
+	trueVal := true
+	falseVal := false
+	testcases := []struct {
+		name   string
+		config config.ProwConfig
+
+		errItems []string
+		okItems  []string
+	}{
+		{
+			name: "no conflict: no strict config",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Orgs: []string{"kubernetes"},
+						},
+					},
+				},
+			},
+			errItems: []string{},
+			okItems:  []string{"kubernetes"},
+		},
+		{
+			name: "no conflict: no tide config",
+			config: config.ProwConfig{
+				BranchProtection: config.BranchProtection{
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Policy: config.Policy{
+								Protect: &trueVal,
+								RequiredStatusChecks: &config.ContextPolicy{
+									Strict: &trueVal,
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{},
+			okItems:  []string{"kubernetes"},
+		},
+		{
+			name: "no conflict: tide repo exclusion",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Orgs:          []string{"kubernetes"},
+							ExcludedRepos: []string{"kubernetes/test-infra"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Policy: config.Policy{
+								Protect: &falseVal,
+							},
+							Repos: map[string]config.Repo{
+								"test-infra": {
+									Policy: config.Policy{
+										Protect: &trueVal,
+										RequiredStatusChecks: &config.ContextPolicy{
+											Strict: &trueVal,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{},
+			okItems:  []string{"kubernetes", "kubernetes/test-infra"},
+		},
+		{
+			name: "no conflict: protection repo exclusion",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Repos: []string{"kubernetes/test-infra"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Policy: config.Policy{
+								Protect: &trueVal,
+								RequiredStatusChecks: &config.ContextPolicy{
+									Strict: &trueVal,
+								},
+							},
+							Repos: map[string]config.Repo{
+								"test-infra": {
+									Policy: config.Policy{
+										Protect: &falseVal,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{},
+			okItems:  []string{"kubernetes", "kubernetes/test-infra"},
+		},
+		{
+			name: "conflict: tide more general",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Orgs: []string{"kubernetes"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+					},
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Repos: map[string]config.Repo{
+								"test-infra": {
+									Policy: config.Policy{
+										Protect: &trueVal,
+										RequiredStatusChecks: &config.ContextPolicy{
+											Strict: &trueVal,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{"kubernetes/test-infra"},
+			okItems:  []string{"kubernetes"},
+		},
+		{
+			name: "conflict: tide more specific",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Repos: []string{"kubernetes/test-infra"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+					},
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Policy: config.Policy{
+								RequiredStatusChecks: &config.ContextPolicy{
+									Strict: &trueVal,
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{"kubernetes/test-infra"},
+			okItems:  []string{"kubernetes"},
+		},
+		{
+			name: "conflict: org level",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Orgs: []string{"kubernetes", "k8s"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+					},
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Policy: config.Policy{
+								RequiredStatusChecks: &config.ContextPolicy{
+									Strict: &trueVal,
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{"kubernetes"},
+			okItems:  []string{"k8s"},
+		},
+		{
+			name: "conflict: repo level",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Repos: []string{"kubernetes/kubernetes"},
+						},
+						{
+							Repos: []string{"kubernetes/test-infra"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+					},
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Repos: map[string]config.Repo{
+								"kubernetes": {
+									Policy: config.Policy{
+										RequiredStatusChecks: &config.ContextPolicy{
+											Strict: &trueVal,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{"kubernetes/kubernetes"},
+			okItems:  []string{"kubernetes", "kubernetes/test-infra"},
+		},
+		{
+			name: "conflict: branch level",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Repos:            []string{"kubernetes/test-infra"},
+							IncludedBranches: []string{"master"},
+						},
+						{
+							Repos: []string{"kubernetes/kubernetes"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+					},
+					Orgs: map[string]config.Org{
+						"kubernetes": {
+							Repos: map[string]config.Repo{
+								"test-infra": {
+									Branches: map[string]config.Branch{
+										"master": {
+											Policy: config.Policy{
+												RequiredStatusChecks: &config.ContextPolicy{
+													Strict: &trueVal,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			errItems: []string{"kubernetes/test-infra"},
+			okItems:  []string{"kubernetes", "kubernetes/kubernetes"},
+		},
+		{
+			name: "conflict: global strict",
+			config: config.ProwConfig{
+				Tide: config.Tide{
+					Queries: []config.TideQuery{
+						{
+							Repos: []string{"kubernetes/test-infra"},
+						},
+					},
+				},
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+						RequiredStatusChecks: &config.ContextPolicy{
+							Strict: &trueVal,
+						},
+					},
+				},
+			},
+			errItems: []string{"global"},
+			okItems:  []string{},
+		},
+		{
+			name: "no conflict: global strict, Tide disabled",
+			config: config.ProwConfig{
+				BranchProtection: config.BranchProtection{
+					Policy: config.Policy{
+						Protect: &trueVal,
+						RequiredStatusChecks: &config.ContextPolicy{
+							Strict: &trueVal,
+						},
+					},
+				},
+			},
+			errItems: []string{},
+			okItems:  []string{"global"},
+		},
+	}
+	for i := range testcases {
+		t.Run(testcases[i].name, func(t *testing.T) {
+			tc := testcases[i]
+			t.Parallel()
+			err := validateStrictBranches(tc.config)
+			if err == nil && len(tc.errItems) > 0 {
+				t.Errorf("Expected errors for the following items, but didn't see an error: %v.", tc.errItems)
+			} else if err != nil && len(tc.errItems) == 0 {
+				t.Errorf("Unexpected error: %v.", err)
+			}
+			if err == nil {
+				return
+			}
+			errText := err.Error()
+			for _, errItem := range tc.errItems {
+				// Search for the token while explicitly forbidding neighboring slashes
+				// so that orgs don't match member repos.
+				re, err := regexp.Compile(fmt.Sprintf("[^/]%s[^/]", errItem))
+				if err != nil {
+					t.Fatalf("Unexpected error compiling regexp: %v.", err)
+				}
+				if !re.MatchString(errText) {
+					t.Errorf("Error did not reference expected error item %q: %q.", errItem, errText)
+				}
+			}
+			for _, okItem := range tc.okItems {
+				re, err := regexp.Compile(fmt.Sprintf("[^/]%s[^/]", okItem))
+				if err != nil {
+					t.Fatalf("Unexpected error compiling regexp: %v.", err)
+				}
+				if re.MatchString(errText) {
+					t.Errorf("Error unexpectedly included ok item %q: %q.", okItem, errText)
+				}
+			}
+		})
+	}
+}
+
+func TestWarningEnabled(t *testing.T) {
+	var testCases = []struct {
+		name      string
+		warnings  []string
+		excludes  []string
+		candidate string
+		expected  bool
+	}{
+		{
+			name:      "nothing is found in empty sets",
+			warnings:  []string{},
+			excludes:  []string{},
+			candidate: "missing",
+			expected:  false,
+		},
+		{
+			name:      "explicit warning is found",
+			warnings:  []string{"found"},
+			excludes:  []string{},
+			candidate: "found",
+			expected:  true,
+		},
+		{
+			name:      "explicit warning that is excluded is not found",
+			warnings:  []string{"found"},
+			excludes:  []string{"found"},
+			candidate: "found",
+			expected:  false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		opt := options{
+			warnings:        flagutil.NewStrings(testCase.warnings...),
+			excludeWarnings: flagutil.NewStrings(testCase.excludes...),
+		}
+		if actual, expected := opt.warningEnabled(testCase.candidate), testCase.expected; actual != expected {
+			t.Errorf("%s: expected warning %s enablement to be %v but got %v", testCase.name, testCase.candidate, expected, actual)
+		}
+	}
+}
+
+type fakeGHContent map[string]map[string]map[string]bool // org[repo][path] -> exist/does not exist
+
+func (f fakeGHContent) GetFile(org, repo, filepath, _ string) ([]byte, error) {
+	if _, hasOrg := f[org]; !hasOrg {
+		return nil, &github.FileNotFound{}
+	}
+	if _, hasRepo := f[org][repo]; !hasRepo {
+		return nil, &github.FileNotFound{}
+	}
+	if _, hasPath := f[org][repo][filepath]; !hasPath {
+		return nil, &github.FileNotFound{}
+	}
+
+	return []byte("CONTENT"), nil
+}
+
+func (f fakeGHContent) GetRepos(org string, isUser bool) ([]github.Repo, error) {
+	if _, hasOrg := f[org]; !hasOrg {
+		return nil, fmt.Errorf("no such org")
+	}
+	var repos []github.Repo
+	for repo := range f[org] {
+		repos = append(
+			repos,
+			github.Repo{
+				Owner:    github.User{Login: org},
+				Name:     repo,
+				FullName: fmt.Sprintf("%s/%s", org, repo),
+			})
+	}
+	return repos, nil
+}
+
+func TestVerifyOwnersPresence(t *testing.T) {
+	testCases := []struct {
+		description string
+		cfg         *plugins.Configuration
+		gh          fakeGHContent
+
+		expected string
+	}{
+		{
+			description: "org with blunderbuss enabled contains a repo without OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org": {"blunderbuss"}}},
+			gh:          fakeGHContent{"org": {"repo": {"NOOWNERS": true}}},
+			expected: "the following orgs or repos enable at least one" +
+				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" its master branch does not contain a root level OWNERS file: [org/repo]",
+		}, {
+			description: "org with approve enable contains a repo without OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org": {"approve"}}},
+			gh:          fakeGHContent{"org": {"repo": {"NOOWNERS": true}}},
+			expected: "the following orgs or repos enable at least one" +
+				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" its master branch does not contain a root level OWNERS file: [org/repo]",
+		}, {
+			description: "org with owners-label enabled contains a repo without OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org": {"owners-label"}}},
+			gh:          fakeGHContent{"org": {"repo": {"NOOWNERS": true}}},
+			expected: "the following orgs or repos enable at least one" +
+				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" its master branch does not contain a root level OWNERS file: [org/repo]",
+		}, {
+			description: "repo with owners-label enabled does not contain OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org/repo": {"owners-label"}}},
+			gh:          fakeGHContent{"org": {"repo": {"NOOWNERS": true}}},
+			expected: "the following orgs or repos enable at least one" +
+				" plugin that uses OWNERS files (approve, blunderbuss, owners-label), but" +
+				" its master branch does not contain a root level OWNERS file: [org/repo]",
+		}, {
+			description: "org with owners-label enabled contains only repos with OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org": {"owners-label"}}},
+			gh:          fakeGHContent{"org": {"repo": {"OWNERS": true}}},
+			expected:    "",
+		}, {
+			description: "repo with owners-label enabled contains OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org/repo": {"owners-label"}}},
+			gh:          fakeGHContent{"org": {"repo": {"OWNERS": true}}},
+			expected:    "",
+		}, {
+			description: "repo with unrelated plugin enabled does not contain OWNERS",
+			cfg:         &plugins.Configuration{Plugins: map[string][]string{"org/repo": {"cat"}}},
+			gh:          fakeGHContent{"org": {"repo": {"NOOWNERS": true}}},
+			expected:    "",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			var errMessage string
+			if err := verifyOwnersPresence(tc.cfg, tc.gh); err != nil {
+				errMessage = err.Error()
+			}
+			if errMessage != tc.expected {
+				t.Errorf("result differs:\n%s", diff.StringDiff(tc.expected, errMessage))
 			}
 		})
 	}

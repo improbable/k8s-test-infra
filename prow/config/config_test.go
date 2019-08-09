@@ -23,9 +23,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"text/template"
 	"time"
 
 	buildv1alpha1 "github.com/knative/build/pkg/apis/build/v1alpha1"
+	pipelinev1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
@@ -298,8 +300,8 @@ periodics:
 			rawConfig: `
 plank:
   default_decoration_config:
-    timeout: 7200000000000 # 2h
-    grace_period: 15000000000 # 15s
+    timeout: 2h
+    grace_period: 15s
     utility_images:
       clonerefs: "clonerefs:default"
       initupload: "initupload:default"
@@ -323,8 +325,8 @@ periodics:
       - "test"
       - "./..."`,
 			expected: &prowapi.DecorationConfig{
-				Timeout:     2 * time.Hour,
-				GracePeriod: 15 * time.Second,
+				Timeout:     &prowapi.Duration{Duration: 2 * time.Hour},
+				GracePeriod: &prowapi.Duration{Duration: 15 * time.Second},
 				UtilityImages: &prowapi.UtilityImages{
 					CloneRefs:  "clonerefs:default",
 					InitUpload: "initupload:default",
@@ -345,8 +347,8 @@ periodics:
 			rawConfig: `
 plank:
   default_decoration_config:
-    timeout: 7200000000000 # 2h
-    grace_period: 15000000000 # 15s
+    timeout: 2h
+    grace_period: 15s
     utility_images:
       clonerefs: "clonerefs:default"
       initupload: "initupload:default"
@@ -382,8 +384,8 @@ periodics:
       - "test"
       - "./..."`,
 			expected: &prowapi.DecorationConfig{
-				Timeout:     1 * time.Nanosecond,
-				GracePeriod: 1 * time.Nanosecond,
+				Timeout:     &prowapi.Duration{Duration: 1 * time.Nanosecond},
+				GracePeriod: &prowapi.Duration{Duration: 1 * time.Nanosecond},
 				UtilityImages: &prowapi.UtilityImages{
 					CloneRefs:  "clonerefs:explicit",
 					InitUpload: "initupload:explicit",
@@ -454,10 +456,11 @@ func TestValidateAgent(t *testing.T) {
 		pass bool
 	}{
 		{
-			name: "reject unknown agent",
+			name: "accept unknown agent",
 			base: func(j *JobBase) {
 				j.Agent = "random-agent"
 			},
+			pass: true,
 		},
 		{
 			name: "spec requires kubernetes agent",
@@ -734,6 +737,141 @@ func TestValidatePodSpec(t *testing.T) {
 	}
 }
 
+func TestValidatePipelineRunSpec(t *testing.T) {
+	cases := []struct {
+		name      string
+		jobType   prowapi.ProwJobType
+		spec      func(s *pipelinev1alpha1.PipelineRunSpec)
+		extraRefs []prowapi.Refs
+		noSpec    bool
+		pass      bool
+	}{
+		{
+			name:   "allow nil spec",
+			noSpec: true,
+			pass:   true,
+		},
+		{
+			name: "happy case",
+			pass: true,
+		},
+		{
+			name:    "reject implicit ref for periodic",
+			jobType: prowapi.PeriodicJob,
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_IMPLICIT_GIT_REF"},
+				})
+			},
+			pass: false,
+		},
+		{
+			name:    "allow implicit ref for presubmit",
+			jobType: prowapi.PresubmitJob,
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_IMPLICIT_GIT_REF"},
+				})
+			},
+			pass: true,
+		},
+		{
+			name:    "allow implicit ref for postsubmit",
+			jobType: prowapi.PostsubmitJob,
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_IMPLICIT_GIT_REF"},
+				})
+			},
+			pass: true,
+		},
+		{
+			name: "reject extra refs usage with no extra refs",
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_EXTRA_GIT_REF_0"},
+				})
+			},
+			pass: false,
+		},
+		{
+			name: "allow extra refs usage with extra refs",
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_EXTRA_GIT_REF_0"},
+				})
+			},
+			extraRefs: []prowapi.Refs{{Org: "o", Repo: "r"}},
+			pass:      true,
+		},
+		{
+			name: "reject wrong extra refs index usage",
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_EXTRA_GIT_REF_1"},
+				})
+			},
+			extraRefs: []prowapi.Refs{{Org: "o", Repo: "r"}},
+			pass:      false,
+		},
+		{
+			name:      "reject extra refs without usage",
+			extraRefs: []prowapi.Refs{{Org: "o", Repo: "r"}},
+			pass:      false,
+		},
+		{
+			name: "allow unrelated resource refs",
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "some-other-ref"},
+				})
+			},
+			pass: true,
+		},
+		{
+			name: "reject leading zeros when extra ref usage is otherwise valid",
+			spec: func(s *pipelinev1alpha1.PipelineRunSpec) {
+				s.Resources = append(s.Resources, pipelinev1alpha1.PipelineResourceBinding{
+					Name:        "git ref",
+					ResourceRef: pipelinev1alpha1.PipelineResourceRef{Name: "PROW_EXTRA_GIT_REF_000"},
+				})
+			},
+			extraRefs: []prowapi.Refs{{Org: "o", Repo: "r"}},
+			pass:      false,
+		},
+	}
+
+	spec := pipelinev1alpha1.PipelineRunSpec{}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jt := prowapi.PresubmitJob
+			if tc.jobType != "" {
+				jt = tc.jobType
+			}
+			current := spec.DeepCopy()
+			if tc.noSpec {
+				current = nil
+			} else if tc.spec != nil {
+				tc.spec(current)
+			}
+			switch err := ValidatePipelineRunSpec(jt, tc.extraRefs, current); {
+			case err == nil && !tc.pass:
+				t.Error("validation failed to raise an error")
+			case err != nil && tc.pass:
+				t.Errorf("validation should have passed, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateDecoration(t *testing.T) {
 	defCfg := prowapi.DecorationConfig{
 		UtilityImages: &prowjobv1.UtilityImages{
@@ -956,6 +1094,16 @@ func TestValidateJobBase(t *testing.T) {
 				Namespace: &ns,
 			},
 			pass: true,
+		},
+		{
+			name: "invalid rerun_permissions",
+			base: JobBase{
+				RerunAuthConfig: &prowapi.RerunAuthConfig{
+					AllowAnyone: true,
+					GitHubUsers: []string{"user"},
+				},
+			},
+			pass: false,
 		},
 	}
 
@@ -1688,12 +1836,40 @@ func TestBrancher_Intersects(t *testing.T) {
 			},
 			result: true,
 		},
+		{
+			name: "NoIntersectionBecauseRegexSkip",
+			a: Brancher{
+				SkipBranches: []string{`release-\d+\.\d+`},
+			},
+			b: Brancher{
+				Branches: []string{`release-1.14`, `release-1.13`},
+			},
+			result: false,
+		},
+		{
+			name: "IntersectionDespiteRegexSkip",
+			a: Brancher{
+				SkipBranches: []string{`release-\d+\.\d+`},
+			},
+			b: Brancher{
+				Branches: []string{`release-1.14`, `master`},
+			},
+			result: true,
+		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(st *testing.T) {
-			r1 := tc.a.Intersects(tc.b)
-			r2 := tc.b.Intersects(tc.a)
+			a, err := setBrancherRegexes(tc.a)
+			if err != nil {
+				st.Fatalf("Failed to set brancher A regexes: %v", err)
+			}
+			b, err := setBrancherRegexes(tc.b)
+			if err != nil {
+				st.Fatalf("Failed to set brancher B regexes: %v", err)
+			}
+			r1 := a.Intersects(b)
+			r2 := b.Intersects(a)
 			for _, result := range []bool{r1, r2} {
 				if result != tc.result {
 					st.Errorf("Expected %v got %v", tc.result, result)
@@ -1790,9 +1966,9 @@ func TestValidGitHubReportType(t *testing.T) {
 		expectTypes []prowapi.ProwJobType
 	}{
 		{
-			name:        "empty config should default to report for presubmit only",
+			name:        "empty config should default to report for both presubmit and postsubmit",
 			prowConfig:  ``,
-			expectTypes: []prowapi.ProwJobType{prowapi.PresubmitJob},
+			expectTypes: []prowapi.ProwJobType{prowapi.PresubmitJob, prowapi.PostsubmitJob},
 		},
 		{
 			name: "reject unsupported job types",
@@ -1839,6 +2015,206 @@ github_reporter:
 		if err == nil {
 			if !reflect.DeepEqual(cfg.GitHubReporter.JobTypesToReport, tc.expectTypes) {
 				t.Errorf("tc %s: expected %#v\n!=\nactual %#v", tc.name, tc.expectTypes, cfg.GitHubReporter.JobTypesToReport)
+			}
+		}
+	}
+}
+
+func TestValidRerunAuthConfig(t *testing.T) {
+	var testCases = []struct {
+		name        string
+		prowConfig  string
+		expectError bool
+	}{
+		{
+			name: "valid rerun auth config",
+			prowConfig: `
+deck:
+  rerun_auth_config:
+    allow_anyone: false
+    github_users:
+    - someperson
+    - someotherperson
+`,
+			expectError: false,
+		},
+		{
+			name: "allow anyone and whitelist specified",
+			prowConfig: `
+deck:
+  rerun_auth_config:
+    allow_anyone: true
+    github_users:
+    - someperson
+    - anotherperson
+`,
+			expectError: true,
+		},
+		{
+			name: "empty config",
+			prowConfig: `
+deck:
+  rerun_auth_config:
+`,
+			expectError: false,
+		},
+		{
+			name: "allow anyone with empty whitelist",
+			prowConfig: `
+deck:
+  rerun_auth_config:
+    allow_anyone: true
+    github_users:
+`,
+			expectError: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		// save the config
+		prowConfigDir, err := ioutil.TempDir("", "prowConfig")
+		if err != nil {
+			t.Fatalf("fail to make tempdir: %v", err)
+		}
+		defer os.RemoveAll(prowConfigDir)
+
+		prowConfig := filepath.Join(prowConfigDir, "config.yaml")
+		if err := ioutil.WriteFile(prowConfig, []byte(tc.prowConfig), 0666); err != nil {
+			t.Fatalf("fail to write prow config: %v", err)
+		}
+
+		_, err = Load(prowConfig, "")
+		if tc.expectError && err == nil {
+			t.Errorf("tc %s: Expect error, but got nil", tc.name)
+		} else if !tc.expectError && err != nil {
+			t.Errorf("tc %s: Expect no error, but got error %v", tc.name, err)
+		}
+	}
+}
+
+func TestMergeCommitTemplateLoading(t *testing.T) {
+	var testCases = []struct {
+		name        string
+		prowConfig  string
+		expectError bool
+		expect      map[string]TideMergeCommitTemplate
+	}{
+		{
+			name: "no template",
+			prowConfig: `
+tide:
+  merge_commit_template:
+`,
+			expect: nil,
+		},
+		{
+			name: "empty template",
+			prowConfig: `
+tide:
+  merge_commit_template:
+    kubernetes/ingress:
+`,
+			expect: map[string]TideMergeCommitTemplate{
+				"kubernetes/ingress": {},
+			},
+		},
+		{
+			name: "two proper templates",
+			prowConfig: `
+tide:
+  merge_commit_template:
+    kubernetes/ingress:
+      title: "{{ .Title }}"
+      body: "{{ .Body }}"
+`,
+			expect: map[string]TideMergeCommitTemplate{
+				"kubernetes/ingress": {
+					TitleTemplate: "{{ .Title }}",
+					BodyTemplate:  "{{ .Body }}",
+					Title:         template.Must(template.New("CommitTitle").Parse("{{ .Title }}")),
+					Body:          template.Must(template.New("CommitBody").Parse("{{ .Body }}")),
+				},
+			},
+		},
+		{
+			name: "only title template",
+			prowConfig: `
+tide:
+  merge_commit_template:
+    kubernetes/ingress:
+      title: "{{ .Title }}"
+`,
+			expect: map[string]TideMergeCommitTemplate{
+				"kubernetes/ingress": {
+					TitleTemplate: "{{ .Title }}",
+					BodyTemplate:  "",
+					Title:         template.Must(template.New("CommitTitle").Parse("{{ .Title }}")),
+					Body:          nil,
+				},
+			},
+		},
+		{
+			name: "only body template",
+			prowConfig: `
+tide:
+  merge_commit_template:
+    kubernetes/ingress:
+      body: "{{ .Body }}"
+`,
+			expect: map[string]TideMergeCommitTemplate{
+				"kubernetes/ingress": {
+					TitleTemplate: "",
+					BodyTemplate:  "{{ .Body }}",
+					Title:         nil,
+					Body:          template.Must(template.New("CommitBody").Parse("{{ .Body }}")),
+				},
+			},
+		},
+		{
+			name: "malformed title template",
+			prowConfig: `
+tide:
+  merge_commit_template:
+    kubernetes/ingress:
+      title: "{{ .Title"
+`,
+			expectError: true,
+		},
+		{
+			name: "malformed body template",
+			prowConfig: `
+tide:
+  merge_commit_template:
+    kubernetes/ingress:
+      body: "{{ .Body"
+`,
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		// save the config
+		prowConfigDir, err := ioutil.TempDir("", "prowConfig")
+		if err != nil {
+			t.Fatalf("fail to make tempdir: %v", err)
+		}
+		defer os.RemoveAll(prowConfigDir)
+
+		prowConfig := filepath.Join(prowConfigDir, "config.yaml")
+		if err := ioutil.WriteFile(prowConfig, []byte(tc.prowConfig), 0666); err != nil {
+			t.Fatalf("fail to write prow config: %v", err)
+		}
+
+		cfg, err := Load(prowConfig, "")
+		if tc.expectError && err == nil {
+			t.Errorf("tc %s: Expect error, but got nil", tc.name)
+		} else if !tc.expectError && err != nil {
+			t.Errorf("tc %s: Expect no error, but got error %v", tc.name, err)
+		}
+
+		if err == nil {
+			if !reflect.DeepEqual(cfg.Tide.MergeTemplate, tc.expect) {
+				t.Errorf("tc %s: expected %#v\n!=\nactual %#v", tc.name, tc.expect, cfg.Tide.MergeTemplate)
 			}
 		}
 	}
@@ -2017,6 +2393,96 @@ func TestValidateComponentConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if hasErr := tc.config.validateComponentConfig() != nil; hasErr != tc.errExpected {
 				t.Errorf("expected err: %t but was %t", tc.errExpected, hasErr)
+			}
+		})
+	}
+}
+
+func TestSlackReporterValidation(t *testing.T) {
+	testCases := []struct {
+		name            string
+		channel         string
+		reportTemplate  string
+		successExpected bool
+	}{
+		{
+			name:            "Valid config - no error",
+			channel:         "my-channel",
+			successExpected: true,
+		},
+		{
+			name: "No channel - error",
+		},
+		{
+			name:           "Invalid template - error",
+			channel:        "my-channel",
+			reportTemplate: "{{ if .Spec.Name}}",
+		},
+		{
+			name:           "Template accessed invalid property - error",
+			channel:        "my-channel",
+			reportTemplate: "{{ .Undef}}",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &SlackReporter{
+				Channel:        tc.channel,
+				ReportTemplate: tc.reportTemplate,
+			}
+
+			if err := cfg.DefaultAndValidate(); (err == nil) != tc.successExpected {
+				t.Errorf("Expected success=%t but got err=%v", tc.successExpected, err)
+			}
+		})
+	}
+}
+
+func TestValidateTriggering(t *testing.T) {
+	testCases := []struct {
+		name        string
+		presubmit   Presubmit
+		errExpected bool
+	}{
+		{
+			name: "Trigger set, rerun command unset, err",
+			presubmit: Presubmit{
+				Trigger: "my-trigger",
+				Reporter: Reporter{
+					Context: "my-context",
+				},
+			},
+			errExpected: true,
+		},
+		{
+			name: "Triger unset, rerun command set, err",
+			presubmit: Presubmit{
+				RerunCommand: "my-rerun-command",
+				Reporter: Reporter{
+					Context: "my-context",
+				},
+			},
+			errExpected: true,
+		},
+		{
+			name: "Both trigger and rerun command set, no err",
+			presubmit: Presubmit{
+				Trigger:      "my-trigger",
+				RerunCommand: "my-rerun-command",
+				Reporter: Reporter{
+					Context: "my-context",
+				},
+			},
+			errExpected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateTriggering(tc.presubmit)
+			if err != nil != tc.errExpected {
+				t.Errorf("Expected err: %t but got err %v", tc.errExpected, err)
 			}
 		})
 	}

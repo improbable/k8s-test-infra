@@ -8,6 +8,8 @@ not make any attempt to preserve backwards compatibility.
 
 For a brief overview of how Prow runs jobs take a look at ["Life of a Prow Job"](/prow/life_of_a_prow_job.md).
 
+For a sequence diagram of common usage and interactions flow, click [here](https://raw.githubusercontent.com/kubernetes/test-infra/master/prow/docs/pr-interactions-sequence.svg?sanitize=true).
+
 #### Functions and Features
 * Job execution for testing, batch processing, artifact publishing.
     * GitHub events are used to trigger post-PR-merge (postsubmit) jobs and on-PR-update (presubmit) jobs.
@@ -73,7 +75,7 @@ For a brief overview of how Prow runs jobs take a look at ["Life of a Prow Job"]
 Prow is used by the following organizations and projects:
 - [Kubernetes](https://prow.k8s.io)
   - This includes [kubernetes](https://github.com/kubernetes), [kubernetes-client](https://github.com/kubernetes-client), [kubernetes-csi](https://github.com/kubernetes-csi), [kubernetes-incubator](https://github.com/kubernetes-incubator), and [kubernetes-sigs](https://github.com/kubernetes-sigs).
-- [OpenShift](https://deck-ci.svc.ci.openshift.org/)
+- [OpenShift](https://prow.svc.ci.openshift.org/)
   - This includes [openshift](https://github.com/openshift), [openshift-s2i](https://github.com/openshift-s2i), [operator-framework](https://github.com/operator-framework), and some repos in [kubernetes-incubator](https://github.com/kubernetes-incubator), [containers](https://github.com/containers) and [heketi](https://github.com/heketi).
 - [Istio](https://prow.istio.io/)
 - [Knative](https://prow.knative.dev/)
@@ -82,10 +84,12 @@ Prow is used by the following organizations and projects:
 - [Prometheus](http://prombench.prometheus.io/)
 - [Caicloud](https://github.com/caicloud)
 - [Kubeflow](https://github.com/kubeflow)
-- [Azure acs-engine](https://github.com/Azure/acs-engine/tree/master/.prowci)
+- [Azure AKS Engine](https://github.com/Azure/aks-engine/tree/master/.prowci)
 - [tensorflow/minigo](https://github.com/tensorflow/minigo#automated-tests)
 - [helm/charts](https://github.com/helm/charts)
 - [Daisy(google compute image tools)](https://github.com/GoogleCloudPlatform/compute-image-tools/tree/master/test-infra#prow-and-gubenator)
+- [KubeEdge (Kubernetes Native Edge Computing Framework)](https://github.com/kubeedge/kubeedge)
+- [Volcano (Kubernetes Native Batch System)](https://github.com/volcano-sh/volcano)
 
 [Jenkins X](https://jenkins-x.io/) uses [Prow as part of Serverless Jenkins](https://medium.com/@jdrawlings/serverless-jenkins-with-jenkins-x-9134cbfe6870).
 

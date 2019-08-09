@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,9 +25,12 @@ import (
 
 	coreapi "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	prowjobv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	prowjobset "k8s.io/test-infra/prow/client/clientset/versioned"
 	prowjobscheme "k8s.io/test-infra/prow/client/clientset/versioned/scheme"
+	prowjobsetv1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 	prowjobinfov1 "k8s.io/test-infra/prow/client/informers/externalversions/prowjobs/v1"
 	prowjoblisters "k8s.io/test-infra/prow/client/listers/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
@@ -41,7 +45,6 @@ import (
 	duckv1alpha1 "github.com/knative/pkg/apis/duck/v1alpha1"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -56,6 +59,18 @@ import (
 const (
 	controllerName = "prow-build-crd"
 )
+
+type pjClient struct {
+	pjc prowjobsetv1.ProwJobInterface
+}
+
+func (c *pjClient) ReplaceProwJob(name string, pj prowjobv1.ProwJob) (prowjobv1.ProwJob, error) {
+	npj, err := c.pjc.Update(&pj)
+	if npj != nil {
+		return *npj, err
+	}
+	return prowjobv1.ProwJob{}, err
+}
 
 type controller struct {
 	config config.Getter
@@ -73,6 +88,19 @@ type controller struct {
 	prowJobsDone bool
 	buildsDone   map[string]bool
 	wait         string
+
+	useAllowCancellations bool
+}
+
+type controllerOptions struct {
+	kc                    kubernetes.Interface
+	pjc                   prowjobset.Interface
+	pji                   prowjobinfov1.ProwJobInformer
+	buildConfigs          map[string]buildConfig
+	totURL                string
+	prowConfig            config.Getter
+	rl                    workqueue.RateLimitingInterface
+	useAllowCancellations bool
 }
 
 func (c controller) pjNamespace() string {
@@ -100,7 +128,7 @@ func (c *controller) hasSynced() bool {
 		c.buildsDone = map[string]bool{}
 	}
 	for n, cfg := range c.builds {
-		if !cfg.informer.Informer().HasSynced() {
+		if !cfg.informer.HasSynced() {
 			if c.wait != n {
 				c.wait = n
 				logrus.Infof("Waiting on %s builds...", n)
@@ -114,37 +142,40 @@ func (c *controller) hasSynced() bool {
 	return true // Everyone is synced
 }
 
-func newController(kc kubernetes.Interface, pjc prowjobset.Interface, pji prowjobinfov1.ProwJobInformer, buildConfigs map[string]buildConfig, totURL string, prowConfig config.Getter, rl workqueue.RateLimitingInterface) *controller {
+func newController(opts controllerOptions) (*controller, error) {
+	if err := prowjobscheme.AddToScheme(scheme.Scheme); err != nil {
+		return nil, fmt.Errorf("add prow job scheme: %v", err)
+	}
 	// Log to events
-	prowjobscheme.AddToScheme(scheme.Scheme)
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(logrus.Infof)
-	eventBroadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: kc.CoreV1().Events("")})
+	eventBroadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: opts.kc.CoreV1().Events("")})
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, coreapi.EventSource{Component: controllerName})
 
 	// Create struct
 	c := &controller{
-		builds:     buildConfigs,
-		config:     prowConfig,
-		pjc:        pjc,
-		pjInformer: pji.Informer(),
-		pjLister:   pji.Lister(),
-		recorder:   recorder,
-		totURL:     totURL,
-		workqueue:  rl,
+		builds:                opts.buildConfigs,
+		config:                opts.prowConfig,
+		pjc:                   opts.pjc,
+		pjInformer:            opts.pji.Informer(),
+		pjLister:              opts.pji.Lister(),
+		recorder:              recorder,
+		totURL:                opts.totURL,
+		workqueue:             opts.rl,
+		useAllowCancellations: opts.useAllowCancellations,
 	}
 
 	logrus.Info("Setting up event handlers")
 
 	// Reconcile whenever a prowjob changes
-	pji.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	opts.pji.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pj, ok := obj.(*prowjobv1.ProwJob)
 			if !ok {
 				logrus.Warnf("Ignoring bad prowjob add: %v", obj)
 				return
 			}
-			c.enqueueKey(pj.Spec.Cluster, pj)
+			c.enqueueKey(pjutil.ClusterToCtx(pj.Spec.Cluster), pj)
 		},
 		UpdateFunc: func(old, new interface{}) {
 			pj, ok := new.(*prowjobv1.ProwJob)
@@ -152,7 +183,7 @@ func newController(kc kubernetes.Interface, pjc prowjobset.Interface, pji prowjo
 				logrus.Warnf("Ignoring bad prowjob update: %v", new)
 				return
 			}
-			c.enqueueKey(pj.Spec.Cluster, pj)
+			c.enqueueKey(pjutil.ClusterToCtx(pj.Spec.Cluster), pj)
 		},
 		DeleteFunc: func(obj interface{}) {
 			pj, ok := obj.(*prowjobv1.ProwJob)
@@ -160,14 +191,14 @@ func newController(kc kubernetes.Interface, pjc prowjobset.Interface, pji prowjo
 				logrus.Warnf("Ignoring bad prowjob delete: %v", obj)
 				return
 			}
-			c.enqueueKey(pj.Spec.Cluster, pj)
+			c.enqueueKey(pjutil.ClusterToCtx(pj.Spec.Cluster), pj)
 		},
 	})
 
-	for ctx, cfg := range buildConfigs {
+	for ctx, cfg := range opts.buildConfigs {
 		// Reconcile whenever a build changes.
 		ctx := ctx // otherwise it will change
-		cfg.informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		cfg.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				c.enqueueKey(ctx, obj)
 			},
@@ -180,7 +211,7 @@ func newController(kc kubernetes.Interface, pjc prowjobset.Interface, pji prowjo
 		})
 	}
 
-	return c
+	return c, nil
 }
 
 // Run starts threads workers, returning after receiving a stop signal.
@@ -259,10 +290,26 @@ type reconciler interface {
 	updateProwJob(pj *prowjobv1.ProwJob) (*prowjobv1.ProwJob, error)
 	now() metav1.Time
 	buildID(prowjobv1.ProwJob) (string, string, error)
+	defaultBuildTimeout() time.Duration
+	terminateDupProwJobs(ctx string, namespace string) error
 }
 
 func (c *controller) getProwJob(name string) (*prowjobv1.ProwJob, error) {
 	return c.pjLister.ProwJobs(c.pjNamespace()).Get(name)
+}
+
+func (c *controller) getProwJobs(namespace string) ([]prowjobv1.ProwJob, error) {
+	result := []prowjobv1.ProwJob{}
+	jobs, err := c.pjLister.ProwJobs(namespace).List(labels.Everything())
+	if err != nil {
+		return result, err
+	}
+	for _, job := range jobs {
+		if job.Spec.Agent == prowjobv1.KnativeBuildAgent {
+			result = append(result, *job)
+		}
+	}
+	return result, nil
 }
 
 func (c *controller) updateProwJob(pj *prowjobv1.ProwJob) (*prowjobv1.ProwJob, error) {
@@ -270,29 +317,38 @@ func (c *controller) updateProwJob(pj *prowjobv1.ProwJob) (*prowjobv1.ProwJob, e
 	return c.pjc.ProwV1().ProwJobs(c.pjNamespace()).Update(pj)
 }
 
-func (c *controller) getBuild(context, namespace, name string) (*buildv1alpha1.Build, error) {
-	b, ok := c.builds[context]
+func (c *controller) getBuild(contextName, namespace, name string) (*buildv1alpha1.Build, error) {
+	b, ok := c.builds[contextName]
 	if !ok {
 		return nil, errors.New("context not found")
 	}
-	return b.informer.Lister().Builds(namespace).Get(name)
+	build := &buildv1alpha1.Build{}
+	nn := types.NamespacedName{Namespace: namespace, Name: name}
+	return build, b.client.Get(context.TODO(), nn, build)
 }
-func (c *controller) deleteBuild(context, namespace, name string) error {
-	logrus.Debugf("deleteBuild(%s,%s,%s)", context, namespace, name)
-	b, ok := c.builds[context]
+func (c *controller) deleteBuild(contextName, namespace, name string) error {
+	logrus.Debugf("deleteBuild(%s,%s,%s)", contextName, namespace, name)
+	b, ok := c.builds[contextName]
 	if !ok {
 		return errors.New("context not found")
 	}
-	return b.client.BuildV1alpha1().Builds(namespace).Delete(name, &metav1.DeleteOptions{})
+	buildObj := &buildv1alpha1.Build{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	return b.client.Delete(context.TODO(), buildObj)
 }
-func (c *controller) createBuild(context, namespace string, b *buildv1alpha1.Build) (*buildv1alpha1.Build, error) {
-	logrus.Debugf("createBuild(%s,%s,%s)", context, namespace, b.Name)
-	bc, ok := c.builds[context]
+func (c *controller) createBuild(contextName, namespace string, b *buildv1alpha1.Build) (*buildv1alpha1.Build, error) {
+	logrus.Debugf("createBuild(%s,%s,%s)", contextName, namespace, b.Name)
+	bc, ok := c.builds[contextName]
 	if !ok {
 		return nil, errors.New("context not found")
 	}
-	return bc.client.BuildV1alpha1().Builds(namespace).Create(b)
+	return b, bc.client.Create(context.TODO(), b)
 }
+
 func (c *controller) now() metav1.Time {
 	return metav1.Now()
 }
@@ -307,13 +363,33 @@ func (c *controller) buildID(pj prowjobv1.ProwJob) (string, string, error) {
 	return id, url, nil
 }
 
-var (
-	groupVersionKind = schema.GroupVersionKind{
-		Group:   prowjobv1.SchemeGroupVersion.Group,
-		Version: prowjobv1.SchemeGroupVersion.Version,
-		Kind:    "ProwJob",
+func (c *controller) defaultBuildTimeout() time.Duration {
+	return c.config().DefaultJobTimeout.Duration
+}
+
+func (c *controller) allowCancellations() bool {
+	return c.useAllowCancellations && c.config().Plank.AllowCancellations
+}
+
+func (c *controller) terminateDupProwJobs(ctx string, namespace string) error {
+	pjClient := &pjClient{
+		pjc: c.pjc.ProwV1().ProwJobs(c.config().ProwJobNamespace),
 	}
-)
+	log := logrus.NewEntry(logrus.StandardLogger()).WithField("aborter", "build")
+
+	jobs, err := c.getProwJobs(namespace)
+	if err != nil {
+		return err
+	}
+	return pjutil.TerminateOlderJobs(pjClient, log, jobs, func(toCancel prowjobv1.ProwJob) error {
+		if c.allowCancellations() {
+			if err := c.deleteBuild(ctx, namespace, toCancel.GetName()); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting build: %v", err)
+			}
+		}
+		return nil
+	})
+}
 
 // reconcile ensures a knative-build prowjob has a corresponding build, updating the prowjob's status as the build progresses.
 func reconcile(c reconciler, key string) error {
@@ -321,6 +397,10 @@ func reconcile(c reconciler, key string) error {
 	if err != nil {
 		runtime.HandleError(err)
 		return nil
+	}
+
+	if err := c.terminateDupProwJobs(ctx, namespace); err != nil {
+		logrus.WithError(err).Warn("Cannot terminate duplicated prow jobs")
 	}
 
 	var wantBuild bool
@@ -333,9 +413,9 @@ func reconcile(c reconciler, key string) error {
 		return fmt.Errorf("get prowjob: %v", err)
 	case pj.Spec.Agent != prowjobv1.KnativeBuildAgent:
 		// Do not want a build for this job
-	case pj.Spec.Cluster != ctx:
+	case pjutil.ClusterToCtx(pj.Spec.Cluster) != ctx:
 		// Build is in wrong cluster, we do not want this build
-		logrus.Warnf("%s found in context %s not %s", key, ctx, pj.Spec.Cluster)
+		logrus.Warnf("%s found in context %s not %s", key, ctx, pjutil.ClusterToCtx(pj.Spec.Cluster))
 	case pj.DeletionTimestamp == nil:
 		wantBuild = true
 	}
@@ -384,7 +464,7 @@ func reconcile(c reconciler, key string) error {
 		pj.Status.BuildID = id
 		pj.Status.URL = url
 		newBuildID = true
-		if b, err = makeBuild(*pj); err != nil {
+		if b, err = makeBuild(*pj, c.defaultBuildTimeout()); err != nil {
 			return fmt.Errorf("make build: %v", err)
 		}
 		logrus.Infof("Create builds/%s", key)
@@ -617,7 +697,7 @@ func decorateSteps(steps []coreapi.Container, dc prowjobv1.DecorationConfig, too
 			previousMarker = entries[i-1].MarkerFile
 		}
 		// TODO(fejta): consider refactoring entrypoint to accept --expire=time.Now.Add(dc.Timeout) so we timeout each step correctly (assuming a good clock)
-		opt, err := decorate.InjectEntrypoint(&steps[i], dc.Timeout, dc.GracePeriod, steps[i].Name, previousMarker, alwaysPass, logMount, toolsMount)
+		opt, err := decorate.InjectEntrypoint(&steps[i], dc.Timeout.Get(), dc.GracePeriod.Get(), steps[i].Name, previousMarker, alwaysPass, logMount, toolsMount)
 		if err != nil {
 			return nil, fmt.Errorf("inject entrypoint into %s: %v", steps[i].Name, err)
 		}
@@ -628,9 +708,11 @@ func decorateSteps(steps []coreapi.Container, dc prowjobv1.DecorationConfig, too
 
 // injectedSteps returns initial containers, a final container and an additional volume.
 func injectedSteps(encodedJobSpec string, dc prowjobv1.DecorationConfig, injectedSource bool, toolsMount coreapi.VolumeMount, entries []wrapper.Options) ([]coreapi.Container, *coreapi.Container, *coreapi.Volume, error) {
-	gcsVol, gcsMount, gcsOptions := decorate.GCSOptions(dc)
+	// localMode parameter is false and outputMount is nil because we don't have a local decoration
+	// mode for "agent: build" jobs yet. (We need a mkpod equivalent for builds first.)
+	gcsVol, gcsMount, gcsOptions := decorate.GCSOptions(dc, false)
 
-	sidecar, err := decorate.Sidecar(dc.UtilityImages.Sidecar, gcsOptions, gcsMount, logMount, encodedJobSpec, decorate.RequirePassingEntries, entries...)
+	sidecar, err := decorate.Sidecar(dc.UtilityImages.Sidecar, gcsOptions, gcsMount, logMount, nil, encodedJobSpec, decorate.RequirePassingEntries, entries...)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("inject sidecar: %v", err)
 	}
@@ -639,41 +721,58 @@ func injectedSteps(encodedJobSpec string, dc prowjobv1.DecorationConfig, injecte
 	if injectedSource {
 		cloneLogMount = &logMount
 	}
-	initUpload, err := decorate.InitUpload(dc.UtilityImages.InitUpload, gcsOptions, gcsMount, cloneLogMount, encodedJobSpec)
+	initUpload, err := decorate.InitUpload(dc.UtilityImages.InitUpload, gcsOptions, gcsMount, cloneLogMount, nil, encodedJobSpec)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("inject initupload: %v", err)
 	}
 
 	placer := decorate.PlaceEntrypoint(dc.UtilityImages.Entrypoint, toolsMount)
 
-	return []coreapi.Container{placer, *initUpload}, sidecar, &gcsVol, nil
+	return []coreapi.Container{placer, *initUpload}, sidecar, gcsVol, nil
+}
+
+// determineTimeout decides the timeout value used for build
+func determineTimeout(spec *buildv1alpha1.BuildSpec, dc *prowjobv1.DecorationConfig, defaultTimeout time.Duration) time.Duration {
+	switch {
+	case spec.Timeout != nil:
+		return spec.Timeout.Duration
+	case dc != nil && dc.Timeout.Get() > 0:
+		return dc.Timeout.Duration
+	default:
+		return defaultTimeout
+	}
+}
+
+func injectTimeout(spec *buildv1alpha1.BuildSpec, dc *prowjobv1.DecorationConfig, defaultTimeout time.Duration) {
+	spec.Timeout = &metav1.Duration{Duration: determineTimeout(spec, dc, defaultTimeout)}
 }
 
 func decorateBuild(spec *buildv1alpha1.BuildSpec, encodedJobSpec string, dc prowjobv1.DecorationConfig, injectedSource bool) error {
 	toolsVolume, toolsMount := tools()
-
-	if spec.Timeout == nil && dc.Timeout > 0 {
-		spec.Timeout = &metav1.Duration{Duration: dc.Timeout}
-	}
 
 	entries, err := decorateSteps(spec.Steps, dc, toolsMount)
 	if err != nil {
 		return fmt.Errorf("decorate steps: %v", err)
 	}
 
-	befores, after, vol, err := injectedSteps(encodedJobSpec, dc, injectedSource, toolsMount, entries)
+	befores, after, gcsVol, err := injectedSteps(encodedJobSpec, dc, injectedSource, toolsMount, entries)
 	if err != nil {
 		return fmt.Errorf("add injected steps: %v", err)
 	}
 
 	spec.Steps = append(befores, spec.Steps...)
 	spec.Steps = append(spec.Steps, *after)
-	spec.Volumes = append(spec.Volumes, toolsVolume, *vol)
+	spec.Volumes = append(spec.Volumes, toolsVolume)
+	if gcsVol != nil {
+		// This check isn't strictly necessary until/unless we add a local mode for build jobs.
+		// /shrug
+		spec.Volumes = append(spec.Volumes, *gcsVol)
+	}
 	return nil
 }
 
 // makeBuild creates a build from the prowjob, using the prowjob's buildspec.
-func makeBuild(pj prowjobv1.ProwJob) (*buildv1alpha1.Build, error) {
+func makeBuild(pj prowjobv1.ProwJob, defaultTimeout time.Duration) (*buildv1alpha1.Build, error) {
 	if pj.Spec.BuildSpec == nil {
 		return nil, errors.New("nil BuildSpec in spec")
 	}
@@ -691,7 +790,14 @@ func makeBuild(pj prowjobv1.ProwJob) (*buildv1alpha1.Build, error) {
 	}
 	injectEnvironment(&b, rawEnv)
 	injectedSource, err := injectSource(&b, pj)
+	if err != nil {
+		return nil, fmt.Errorf("inject source: %v", err)
+	}
+	injectTimeout(&b.Spec, pj.Spec.DecorationConfig, defaultTimeout)
 	if pj.Spec.DecorationConfig != nil {
+		if b.Spec.Template != nil {
+			return nil, errors.New("cannot decorate Build using BuildTemplate")
+		}
 		encodedJobSpec := rawEnv[downwardapi.JobSpecEnv]
 		err = decorateBuild(&b.Spec, encodedJobSpec, *pj.Spec.DecorationConfig, injectedSource)
 		if err != nil {

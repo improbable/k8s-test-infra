@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -51,12 +50,18 @@ labels:
 - bob
 reviewers:
 - alice
-- CJWagner
+- "@CJWagner"
 - jakub
 required_reviewers:
 - ben
 labels:
 - src-code`),
+		"src/dir/subdir/OWNERS": []byte(`approvers:
+- bob
+- alice
+reviewers:
+- bob
+- alice`),
 		"src/dir/conformance/OWNERS": []byte(`options:
   no_parent_owners: true
 approvers:
@@ -68,6 +73,10 @@ approvers:
 labels:
 - docs
 ---`),
+		"vendor/OWNERS": []byte(`approvers:
+- alice`),
+		"vendor/k8s.io/client-go/OWNERS": []byte(`approvers:
+- bob`),
 	}
 
 	testFilesRe = map[string][]byte{
@@ -132,6 +141,7 @@ func getTestClient(
 	enableMdYaml,
 	skipCollab,
 	includeAliases bool,
+	ignorePreconfiguredDefaults bool,
 	ownersDirBlacklistDefault []string,
 	ownersDirBlacklistByRepo map[string][]string,
 	extraBranchesAndFiles map[string]map[string][]byte,
@@ -218,7 +228,7 @@ labels:
 				"OWNERS": []byte(`approvers:
 - cjwagner
 reviewers:
-- Alice
+- "@Alice"
 - bob
 
 required_reviewers:
@@ -253,8 +263,9 @@ labels:
 			},
 			ownersDirBlacklist: func() prowConf.OwnersDirBlacklist {
 				return prowConf.OwnersDirBlacklist{
-					Repos:   ownersDirBlacklistByRepo,
-					Default: ownersDirBlacklistDefault,
+					Repos:                       ownersDirBlacklistByRepo,
+					Default:                     ownersDirBlacklistDefault,
+					IgnorePreconfiguredDefaults: ignorePreconfiguredDefaults,
 				}
 			},
 		},
@@ -267,45 +278,8 @@ labels:
 }
 
 func TestOwnersDirBlacklist(t *testing.T) {
-	validatorExcluded := func(t *testing.T, ro *RepoOwners) {
-		for dir := range ro.approvers {
-			if strings.Contains(dir, "src") {
-				t.Errorf("Expected directory %s to be excluded from the approvers map", dir)
-			}
-		}
-		for dir := range ro.reviewers {
-			if strings.Contains(dir, "src") {
-				t.Errorf("Expected directory %s to be excluded from the reviewers map", dir)
-			}
-		}
-	}
-
-	validatorIncluded := func(t *testing.T, ro *RepoOwners) {
-		approverFound := false
-		for dir := range ro.approvers {
-			if strings.Contains(dir, "src") {
-				approverFound = true
-				break
-			}
-		}
-		if !approverFound {
-			t.Errorf("Expected to find approvers for a path matching */src/*")
-		}
-
-		reviewerFound := false
-		for dir := range ro.reviewers {
-			if strings.Contains(dir, "src") {
-				reviewerFound = true
-				break
-			}
-		}
-		if !reviewerFound {
-			t.Errorf("Expected to find reviewers for a path matching */src/*")
-		}
-	}
-
-	getRepoOwnersWithBlacklist := func(t *testing.T, defaults []string, byRepo map[string][]string) *RepoOwners {
-		client, cleanup, err := getTestClient(testFiles, true, false, true, defaults, byRepo, nil, nil)
+	getRepoOwnersWithBlacklist := func(t *testing.T, defaults []string, byRepo map[string][]string, ignorePreconfiguredDefaults bool) *RepoOwners {
+		client, cleanup, err := getTestClient(testFiles, true, false, true, ignorePreconfiguredDefaults, defaults, byRepo, nil, nil)
 		if err != nil {
 			t.Fatalf("Error creating test client: %v.", err)
 		}
@@ -320,9 +294,11 @@ func TestOwnersDirBlacklist(t *testing.T) {
 	}
 
 	type testConf struct {
-		blackistDefault []string
-		blacklistByRepo map[string][]string
-		validator       func(t *testing.T, ro *RepoOwners)
+		blacklistDefault            []string
+		blacklistByRepo             map[string][]string
+		ignorePreconfiguredDefaults bool
+		includeDirs                 []string
+		excludeDirs                 []string
 	}
 
 	tests := map[string]testConf{}
@@ -331,33 +307,86 @@ func TestOwnersDirBlacklist(t *testing.T) {
 		blacklistByRepo: map[string][]string{
 			"org": {"src"},
 		},
-		validator: validatorExcluded,
+		includeDirs: []string{""},
+		excludeDirs: []string{"src", "src/dir", "src/dir/conformance", "src/dir/subdir"},
 	}
 	tests["blacklist by org/repo"] = testConf{
 		blacklistByRepo: map[string][]string{
 			"org/repo": {"src"},
 		},
-		validator: validatorExcluded,
+		includeDirs: []string{""},
+		excludeDirs: []string{"src", "src/dir", "src/dir/conformance", "src/dir/subdir"},
 	}
 	tests["blacklist by default"] = testConf{
-		blackistDefault: []string{"src"},
-		validator:       validatorExcluded,
+		blacklistDefault: []string{"src"},
+		includeDirs:      []string{""},
+		excludeDirs:      []string{"src", "src/dir", "src/dir/conformance", "src/dir/subdir"},
+	}
+	tests["subdir blacklist"] = testConf{
+		blacklistDefault: []string{"dir"},
+		includeDirs:      []string{"", "src"},
+		excludeDirs:      []string{"src/dir", "src/dir/conformance", "src/dir/subdir"},
 	}
 	tests["no blacklist setup"] = testConf{
-		validator: validatorIncluded,
+		includeDirs: []string{"", "src", "src/dir", "src/dir/conformance", "src/dir/subdir"},
 	}
 	tests["blacklist setup but not matching this repo"] = testConf{
 		blacklistByRepo: map[string][]string{
 			"not_org/not_repo": {"src"},
 			"not_org":          {"src"},
 		},
-		validator: validatorIncluded,
+		includeDirs: []string{"", "src", "src/dir", "src/dir/conformance", "src/dir/subdir"},
+	}
+	tests["non-matching blacklist"] = testConf{
+		blacklistDefault: []string{"sr$"},
+		includeDirs:      []string{"", "src", "src/dir", "src/dir/conformance", "src/dir/subdir"},
+	}
+	tests["path blacklist"] = testConf{
+		blacklistDefault: []string{"src/dir"},
+		includeDirs:      []string{"", "src"},
+		excludeDirs:      []string{"src/dir", "src/dir/conformance", "src/dir/subdir"},
+	}
+	tests["regexp blacklist path"] = testConf{
+		blacklistDefault: []string{"src/dir/."},
+		includeDirs:      []string{"", "src", "src/dir"},
+		excludeDirs:      []string{"src/dir/conformance", "src/dir/subdir"},
+	}
+	tests["path substring"] = testConf{
+		blacklistDefault: []string{"/c"},
+		includeDirs:      []string{"", "src", "src/dir", "src/dir/subdir"},
+		excludeDirs:      []string{"src/dir/conformance"},
+	}
+	tests["exclude preconfigured defaults"] = testConf{
+		includeDirs: []string{"", "src", "src/dir", "src/dir/subdir", "vendor"},
+		excludeDirs: []string{"vendor/k8s.io/client-go"},
+	}
+	tests["ignore preconfigured defaults"] = testConf{
+		includeDirs:                 []string{"", "src", "src/dir", "src/dir/subdir", "vendor", "vendor/k8s.io/client-go"},
+		ignorePreconfiguredDefaults: true,
 	}
 
 	for name, conf := range tests {
 		t.Run(name, func(t *testing.T) {
-			ro := getRepoOwnersWithBlacklist(t, conf.blackistDefault, conf.blacklistByRepo)
-			conf.validator(t, ro)
+			ro := getRepoOwnersWithBlacklist(t, conf.blacklistDefault, conf.blacklistByRepo, conf.ignorePreconfiguredDefaults)
+
+			includeDirs := sets.NewString(conf.includeDirs...)
+			excludeDirs := sets.NewString(conf.excludeDirs...)
+			for dir := range ro.approvers {
+				if excludeDirs.Has(dir) {
+					t.Errorf("Expected directory %s to be excluded from the approvers map", dir)
+				}
+				includeDirs.Delete(dir)
+			}
+			for dir := range ro.reviewers {
+				if excludeDirs.Has(dir) {
+					t.Errorf("Expected directory %s to be excluded from the reviewers map", dir)
+				}
+				includeDirs.Delete(dir)
+			}
+
+			for _, dir := range includeDirs.List() {
+				t.Errorf("Expected to find approvers or reviewers for directory %s", dir)
+			}
 		})
 	}
 }
@@ -372,7 +401,7 @@ func TestOwnersRegexpFiltering(t *testing.T) {
 		"re/b/md.md":   sets.NewString("re/all"),
 	}
 
-	client, cleanup, err := getTestClient(testFilesRe, true, false, true, nil, nil, nil, nil)
+	client, cleanup, err := getTestClient(testFilesRe, true, false, true, false, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Error creating test client: %v.", err)
 	}
@@ -418,10 +447,13 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll(),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -445,10 +477,13 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -473,11 +508,14 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
 				"docs/file.md":        patternAll("alice"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -507,11 +545,14 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll(),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
 				"src/doc":             patternAll("maggie"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -540,10 +581,13 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll(),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -567,10 +611,13 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("best-approvers"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner", "jakub"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner", "jakub"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -612,11 +659,14 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
 				"docs/file.md":        patternAll("alice"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -643,11 +693,14 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
 				"docs/file.md":        patternAll("alice"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -675,10 +728,13 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -706,10 +762,13 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -747,11 +806,14 @@ func TestLoadRepoOwners(t *testing.T) {
 				"src":                 patternAll("carl", "cjwagner"),
 				"src/dir":             patternAll("bob"),
 				"src/dir/conformance": patternAll("mml"),
+				"src/dir/subdir":      patternAll("alice", "bob"),
 				"docs/file.md":        patternAll("alice"),
+				"vendor":              patternAll("alice"),
 			},
 			expectedReviewers: map[string]map[string]sets.String{
-				"":        patternAll("alice", "bob"),
-				"src/dir": patternAll("alice", "cjwagner"),
+				"":               patternAll("alice", "bob"),
+				"src/dir":        patternAll("alice", "cjwagner"),
+				"src/dir/subdir": patternAll("alice", "bob"),
 			},
 			expectedRequiredReviewers: map[string]map[string]sets.String{
 				"":        patternAll("chris"),
@@ -777,7 +839,7 @@ func TestLoadRepoOwners(t *testing.T) {
 
 	for _, test := range tests {
 		t.Logf("Running scenario %q", test.name)
-		client, cleanup, err := getTestClient(testFiles, test.mdEnabled, test.skipCollaborators, test.aliasesFileExists, nil, nil, test.extraBranchesAndFiles, test.cacheOptions)
+		client, cleanup, err := getTestClient(testFiles, test.mdEnabled, test.skipCollaborators, test.aliasesFileExists, false, nil, nil, test.extraBranchesAndFiles, test.cacheOptions)
 		if err != nil {
 			t.Errorf("Error creating test client: %v.", err)
 			continue
@@ -885,7 +947,7 @@ func TestLoadRepoAliases(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		client, cleanup, err := getTestClient(testFiles, false, false, test.aliasFileExists, nil, nil, test.extraBranchesAndFiles, nil)
+		client, cleanup, err := getTestClient(testFiles, false, false, test.aliasFileExists, false, nil, nil, test.extraBranchesAndFiles, nil)
 		if err != nil {
 			t.Errorf("[%s] Error creating test client: %v.", test.name, err)
 			continue

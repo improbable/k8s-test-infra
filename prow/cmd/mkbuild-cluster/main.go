@@ -237,10 +237,11 @@ func do(o options) error {
 	if !o.skipCheck {
 		c, err := kube.NewClient(&newCluster, "kube-system")
 		if err != nil {
-			return err
+			return fmt.Errorf("create client: %v", err)
 		}
 		if _, err = c.ListPods("k8s-app=kube-dns"); err != nil {
-			return fmt.Errorf("authenticated client could not list pods: %v", err)
+			logrus.WithError(err).Errorf("Failed to validate credentials (consider --get-client-cert)")
+			return fmt.Errorf("list all pods to check new credentials: %v", err)
 		}
 	}
 
@@ -255,6 +256,7 @@ func do(o options) error {
 	}
 
 	// Append the new entry to the current secret
+	fmt.Print("--print-entry is not set, waiting for existing cluster map config as input")
 
 	// First read in the secret from stdin
 	b, err := ioutil.ReadAll(os.Stdin)

@@ -29,11 +29,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/andygrunwald/go-gerrit"
 	"github.com/sirupsen/logrus"
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/gerrit/client"
+	"k8s.io/test-infra/prow/gerrit/reporter"
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pjutil"
 )
@@ -46,6 +48,7 @@ type gerritClient interface {
 	QueryChanges(lastUpdate time.Time, rateLimit int) map[string][]client.ChangeInfo
 	GetBranchRevision(instance, project, branch string) (string, error)
 	SetReview(instance, id, revision, message string, labels map[string]string) error
+	Account(instance string) *gerrit.AccountInfo
 }
 
 type configAgent interface {
@@ -149,13 +152,15 @@ func (c *Controller) SaveLastSync(lastSync time.Time) error {
 // Sync looks for newly made gerrit changes
 // and creates prowjobs according to specs
 func (c *Controller) Sync() error {
-	// gerrit timestamp only has second precision
-	syncTime := time.Now().Truncate(time.Second)
+	syncTime := c.lastUpdate
 
 	for instance, changes := range c.gc.QueryChanges(c.lastUpdate, c.config().Gerrit.RateLimit) {
 		for _, change := range changes {
 			if err := c.ProcessChange(instance, change); err != nil {
 				logrus.WithError(err).Errorf("Failed process change %v", change.CurrentRevision)
+			}
+			if syncTime.Before(change.Updated.Time) {
+				syncTime = change.Updated.Time
 			}
 		}
 
@@ -278,15 +283,48 @@ func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) er
 	case client.New:
 		presubmits := c.config().Presubmits[cloneURI.String()]
 		presubmits = append(presubmits, c.config().Presubmits[cloneURI.Host+"/"+cloneURI.Path]...)
-		for _, presubmit := range presubmits {
-			if shouldRun, err := presubmit.ShouldRun(change.Branch, changedFiles, false, false); err != nil {
-				return fmt.Errorf("failed to determine if presubmit %q should run: %v", presubmit.Name, err)
-			} else if shouldRun {
-				jobSpecs = append(jobSpecs, jobSpec{
-					spec:   pjutil.PresubmitSpec(presubmit, refs),
-					labels: presubmit.Labels,
-				})
+
+		var filters []pjutil.Filter
+		var latestReport *reporter.JobReport
+		account := c.gc.Account(instance)
+		// Should not happen, since this means auth failed
+		if account == nil {
+			return fmt.Errorf("unable to get gerrit account")
+		}
+
+		for _, message := range change.Messages {
+			// If message status report is not from the prow account ignore
+			if message.Author.AccountID != account.AccountID {
+				continue
 			}
+			report := reporter.ParseReport(message.Message)
+			if report != nil {
+				logger.Infof("Found latest report: %s", message.Message)
+				latestReport = report
+				break
+			}
+		}
+		if latestReport == nil {
+			logger.Warnf("Found nil latest report")
+		}
+		filter, err := messageFilter(c.lastUpdate, change, presubmits, latestReport, logger)
+		if err != nil {
+			logger.WithError(err).Warn("failed to create filter on messages for presubmits")
+		} else {
+			filters = append(filters, filter)
+		}
+		if change.Revisions[change.CurrentRevision].Created.Time.After(c.lastUpdate) {
+			filters = append(filters, pjutil.TestAllFilter())
+		}
+		toTrigger, _, err := pjutil.FilterPresubmits(pjutil.AggregateFilter(filters), listChangedFiles(change), change.Branch, presubmits, logger)
+		if err != nil {
+			return fmt.Errorf("failed to filter presubmits: %v", err)
+		}
+		for _, presubmit := range toTrigger {
+			jobSpecs = append(jobSpecs, jobSpec{
+				spec:   pjutil.PresubmitSpec(presubmit, refs),
+				labels: presubmit.Labels,
+			})
 		}
 	}
 
@@ -302,7 +340,11 @@ func (c *Controller) ProcessChange(instance string, change client.ChangeInfo) er
 		}
 		labels[client.GerritRevision] = change.CurrentRevision
 
-		pj := pjutil.NewProwJobWithAnnotation(jSpec.spec, labels, annotations)
+		if gerritLabel, ok := labels[client.GerritReportLabel]; !ok || gerritLabel == "" {
+			labels[client.GerritReportLabel] = client.CodeReview
+		}
+
+		pj := pjutil.NewProwJob(jSpec.spec, labels, annotations)
 		if _, err := c.kc.CreateProwJob(pj); err != nil {
 			logger.WithError(err).Errorf("fail to create prowjob %v", pj)
 		} else {

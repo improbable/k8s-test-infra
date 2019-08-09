@@ -17,14 +17,18 @@ limitations under the License.
 package v1
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"strings"
 	"time"
 
 	buildv1alpha1 "github.com/knative/build/pkg/apis/build/v1alpha1"
+	pipelinev1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	prowgithub "k8s.io/test-infra/prow/github"
 )
 
 // ProwJobType specifies how the job is triggered.
@@ -71,6 +75,8 @@ const (
 	JenkinsAgent ProwJobAgent = "jenkins"
 	// KnativeBuildAgent means prow will schedule the job via a build-crd resource.
 	KnativeBuildAgent ProwJobAgent = "knative-build"
+	// TektonAgent means prow will schedule the job via a tekton PipelineRun CRD resource.
+	TektonAgent = "tekton-pipeline"
 )
 
 const (
@@ -115,7 +121,6 @@ type ProwJobSpec struct {
 	// ExtraRefs are auxiliary repositories that
 	// need to be cloned, determined from config
 	ExtraRefs []Refs `json:"extra_refs,omitempty"`
-
 	// Report determines if the result of this job should
 	// be posted as a status on GitHub
 	Report bool `json:"report,omitempty"`
@@ -143,9 +148,124 @@ type ProwJobSpec struct {
 	// https://github.com/knative/build
 	BuildSpec *buildv1alpha1.BuildSpec `json:"build_spec,omitempty"`
 
+	// JenkinsSpec holds configuration specific to Jenkins jobs
+	JenkinsSpec *JenkinsSpec `json:"jenkins_spec,omitempty"`
+
+	// PipelineRunSpec provides the basis for running the test as
+	// a pipeline-crd resource
+	// https://github.com/tektoncd/pipeline
+	PipelineRunSpec *pipelinev1alpha1.PipelineRunSpec `json:"pipeline_run_spec,omitempty"`
+
 	// DecorationConfig holds configuration options for
 	// decorating PodSpecs that users provide
 	DecorationConfig *DecorationConfig `json:"decoration_config,omitempty"`
+
+	// ReporterConfig holds reporter-specific configuration
+	ReporterConfig *ReporterConfig `json:"reporter_config,omitempty"`
+
+	// RerunAuthConfig holds information about which users can rerun the job
+	RerunAuthConfig RerunAuthConfig `json:"rerun_auth_config,omitempty"`
+}
+
+type GitHubTeamSlug struct {
+	Slug string `json:"slug"`
+	Org  string `json:"org"`
+}
+
+type RerunAuthConfig struct {
+	// If AllowAnyone is set to true, any user can rerun the job
+	AllowAnyone bool `json:"allow_anyone,omitempty"`
+	// GitHubTeams contains IDs of GitHub teams of users who can rerun the job
+	// If you know the name of a team and the org it belongs to,
+	// you can look up its ID using this command, where the team slug is the hyphenated name:
+	// curl -H "Authorization: token <token>" "https://api.github.com/orgs/<org-name>/teams/<team slug>"
+	// or, to list all teams in a given org, use
+	// curl -H "Authorization: token <token>" "https://api.github.com/orgs/<org-name>/teams"
+	GitHubTeamIDs []int `json:"github_team_ids,omitempty"`
+	// GitHubTeamSlugs contains slugs and orgs of teams of users who can rerun the job
+	GitHubTeamSlugs []GitHubTeamSlug `json:"github_team_slugs,omitempty"`
+	// GitHubUsers contains names of individual users who can rerun the job
+	GitHubUsers []string `json:"github_users,omitempty"`
+}
+
+// IsSpecifiedUser returns true if AllowAnyone is set to true or if the given user is
+// specified as a permitted GitHubUser
+func (rac *RerunAuthConfig) IsAuthorized(user string, cli prowgithub.RerunClient) (bool, error) {
+	if rac.AllowAnyone {
+		return true, nil
+	}
+	for _, u := range rac.GitHubUsers {
+		if prowgithub.NormLogin(u) == prowgithub.NormLogin(user) {
+			return true, nil
+		}
+	}
+	// if there is no client, no token was provided, so we cannot access the teams
+	if cli == nil {
+		return false, nil
+	}
+	for _, ght := range rac.GitHubTeamIDs {
+		member, err := cli.TeamHasMember(ght, user)
+		if err != nil {
+			return false, fmt.Errorf("GitHub failed to fetch members of team %v, verify that you have the correct team number and access token: %v", ght, err)
+		}
+		if member {
+			return true, nil
+		}
+	}
+	for _, ghts := range rac.GitHubTeamSlugs {
+		team, err := cli.GetTeamBySlug(ghts.Slug, ghts.Org)
+		if err != nil {
+			return false, fmt.Errorf("GitHub failed to fetch team with slug %s and org %s: %v", ghts.Slug, ghts.Org, err)
+		}
+		member, err := cli.TeamHasMember(team.ID, user)
+		if err != nil {
+			return false, fmt.Errorf("GitHub failed to fetch members of team %v: %v", team, err)
+		}
+		if member {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+type ReporterConfig struct {
+	Slack *SlackReporterConfig `json:"slack,omitempty"`
+}
+
+type SlackReporterConfig struct {
+	Channel string `json:"channel"`
+}
+
+// Duration is a wrapper around time.Duration that parses times in either
+// 'integer number of nanoseconds' or 'duration string' formats and serializes
+// to 'duration string' format.
+type Duration struct {
+	time.Duration
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	if err := json.Unmarshal(b, &d.Duration); err == nil {
+		// b was an integer number of nanoseconds.
+		return nil
+	}
+	// b was not an integer. Assume that it is a duration string.
+
+	var str string
+	err := json.Unmarshal(b, &str)
+	if err != nil {
+		return err
+	}
+
+	pd, err := time.ParseDuration(str)
+	if err != nil {
+		return err
+	}
+	d.Duration = pd
+	return nil
+}
+
+func (d *Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.Duration.String())
 }
 
 // DecorationConfig specifies how to augment pods.
@@ -155,11 +275,12 @@ type ProwJobSpec struct {
 type DecorationConfig struct {
 	// Timeout is how long the pod utilities will wait
 	// before aborting a job with SIGINT.
-	Timeout time.Duration `json:"timeout,omitempty"`
+	Timeout *Duration `json:"timeout,omitempty"`
 	// GracePeriod is how long the pod utilities will wait
 	// after sending SIGINT to send SIGKILL when aborting
 	// a job. Only applicable if decorating the PodSpec.
-	GracePeriod time.Duration `json:"grace_period,omitempty"`
+	GracePeriod *Duration `json:"grace_period,omitempty"`
+
 	// UtilityImages holds pull specs for utility container
 	// images used to decorate a PodSpec.
 	UtilityImages *UtilityImages `json:"utility_images,omitempty"`
@@ -202,10 +323,10 @@ func (d *DecorationConfig) ApplyDefault(def *DecorationConfig) *DecorationConfig
 	merged.UtilityImages = merged.UtilityImages.ApplyDefault(def.UtilityImages)
 	merged.GCSConfiguration = merged.GCSConfiguration.ApplyDefault(def.GCSConfiguration)
 
-	if merged.Timeout == 0 {
+	if merged.Timeout == nil {
 		merged.Timeout = def.Timeout
 	}
-	if merged.GracePeriod == 0 {
+	if merged.GracePeriod == nil {
 		merged.GracePeriod = def.GracePeriod
 	}
 	if merged.GCSCredentialsSecret == "" {
@@ -259,6 +380,13 @@ func (d *DecorationConfig) Validate() error {
 		return fmt.Errorf("GCS configuration is invalid: %v", err)
 	}
 	return nil
+}
+
+func (d *Duration) Get() time.Duration {
+	if d == nil {
+		return 0
+	}
+	return d.Duration
 }
 
 // UtilityImages holds pull specs for the utility images
@@ -324,6 +452,14 @@ type GCSConfiguration struct {
 	// DefaultRepo is omitted from GCS paths when using the
 	// legacy or simple strategy
 	DefaultRepo string `json:"default_repo,omitempty"`
+	// MediaTypes holds additional extension media types to add to Go's
+	// builtin's and the local system's defaults.  This maps extensions
+	// to media types, for example: MediaTypes["log"] = "text/plain"
+	MediaTypes map[string]string `json:"mediaTypes,omitempty"`
+
+	// LocalOutputDir specifies a directory where files should be copied INSTEAD of uploading to GCS.
+	// This option is useful for testing jobs that use the pod-utilities without actually uploading.
+	LocalOutputDir string `json:"local_output_dir,omitempty"`
 }
 
 // ApplyDefault applies the defaults for GCSConfiguration decorations. If a field has a zero value,
@@ -357,11 +493,27 @@ func (g *GCSConfiguration) ApplyDefault(def *GCSConfiguration) *GCSConfiguration
 	if merged.DefaultRepo == "" {
 		merged.DefaultRepo = def.DefaultRepo
 	}
+
+	for extension, mediaType := range def.MediaTypes {
+		merged.MediaTypes[extension] = mediaType
+	}
+	for extension, mediaType := range g.MediaTypes {
+		merged.MediaTypes[extension] = mediaType
+	}
+
+	if merged.LocalOutputDir == "" {
+		merged.LocalOutputDir = def.LocalOutputDir
+	}
 	return &merged
 }
 
 // Validate ensures all the values set in the GCSConfiguration are valid.
 func (g *GCSConfiguration) Validate() error {
+	for _, mediaType := range g.MediaTypes {
+		if _, _, err := mime.ParseMediaType(mediaType); err != nil {
+			return fmt.Errorf("invalid extension media type %q: %v", mediaType, err)
+		}
+	}
 	if g.PathStrategy != PathStrategyLegacy && g.PathStrategy != PathStrategyExplicit && g.PathStrategy != PathStrategySingle {
 		return fmt.Errorf("gcs_path_strategy must be one of %q, %q, or %q", PathStrategyLegacy, PathStrategyExplicit, PathStrategySingle)
 	}
@@ -466,6 +618,12 @@ type Refs struct {
 	// set, <root-dir>/src/github.com/org/repo will be
 	// used as the default.
 	PathAlias string `json:"path_alias,omitempty"`
+
+	// WorkDir defines if the location of the cloned
+	// repository will be used as the default working
+	// directory.
+	WorkDir bool `json:"workdir,omitempty"`
+
 	// CloneURI is the URI that is used to clone the
 	// repository. If unset, will default to
 	// `https://github.com/org/repo.git`.
@@ -473,6 +631,9 @@ type Refs struct {
 	// SkipSubmodules determines if submodules should be
 	// cloned when the job is run. Defaults to true.
 	SkipSubmodules bool `json:"skip_submodules,omitempty"`
+	// CloneDepth is the depth of the clone that will be used.
+	// A depth of zero will do a full clone.
+	CloneDepth int `json:"clone_depth,omitempty"`
 }
 
 func (r Refs) String() string {
@@ -493,6 +654,13 @@ func (r Refs) String() string {
 		rs = append(rs, ref)
 	}
 	return strings.Join(rs, ",")
+}
+
+// JenkinsSpec is optional parameters for Jenkins jobs.
+// Currently, the only parameter supported is for telling
+// jenkins-operator that the job is generated by the https://go.cloudbees.com/docs/plugins/github-branch-source/#github-branch-source plugin
+type JenkinsSpec struct {
+	GitHubBranchSourceJob bool `json:"github_branch_source_job,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

@@ -40,6 +40,7 @@ import (
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/logrusutil"
 	pubsubreporter "k8s.io/test-infra/prow/pubsub/reporter"
+	slackreporter "k8s.io/test-infra/prow/slack/reporter"
 )
 
 const (
@@ -53,13 +54,15 @@ type options struct {
 	gerritProjects gerritclient.ProjectsFlag
 	github         prowflagutil.GitHubOptions
 
-	// TODO(krzyzacy): drop config agent!
 	configPath    string
 	jobConfigPath string
 
 	gerritWorkers int
 	pubsubWorkers int
 	githubWorkers int
+	slackWorkers  int
+
+	slackTokenFile string
 
 	dryrun      bool
 	reportAgent string
@@ -70,13 +73,19 @@ func (o *options) validate() error {
 		return errors.New("required flag --config-path was unset")
 	}
 
+	// TODO(krzyzacy): gerrit && github report are actually stateful..
+	// Need a better design to re-enable parallel reporting
 	if o.gerritWorkers > 1 {
-		// TODO(krzyzacy): try to see how to handle racy better for gerrit aggregate report.
 		logrus.Warn("gerrit reporter only supports one worker")
 		o.gerritWorkers = 1
 	}
 
-	if o.gerritWorkers+o.pubsubWorkers+o.githubWorkers <= 0 {
+	if o.githubWorkers > 1 {
+		logrus.Warn("github reporter only supports one worker (https://github.com/kubernetes/test-infra/issues/13306)")
+		o.githubWorkers = 1
+	}
+
+	if o.gerritWorkers+o.pubsubWorkers+o.githubWorkers+o.slackWorkers <= 0 {
 		return errors.New("crier need to have at least one report worker to start")
 	}
 
@@ -96,6 +105,12 @@ func (o *options) validate() error {
 		}
 	}
 
+	if o.slackWorkers > 0 {
+		if o.slackTokenFile == "" {
+			return errors.New("--slack-token-file must be set")
+		}
+	}
+
 	if err := o.client.Validate(o.dryrun); err != nil {
 		return err
 	}
@@ -104,18 +119,23 @@ func (o *options) validate() error {
 }
 
 func (o *options) parseArgs(fs *flag.FlagSet, args []string) error {
+
+	o.gerritProjects = gerritclient.ProjectsFlag{}
+
 	fs.StringVar(&o.cookiefilePath, "cookiefile", "", "Path to git http.cookiefile, leave empty for anonymous")
 	fs.Var(&o.gerritProjects, "gerrit-projects", "Set of gerrit repos to monitor on a host example: --gerrit-host=https://android.googlesource.com=platform/build,toolchain/llvm, repeat flag for each host")
 	fs.IntVar(&o.gerritWorkers, "gerrit-workers", 0, "Number of gerrit report workers (0 means disabled)")
 	fs.IntVar(&o.pubsubWorkers, "pubsub-workers", 0, "Number of pubsub report workers (0 means disabled)")
 	fs.IntVar(&o.githubWorkers, "github-workers", 0, "Number of github report workers (0 means disabled)")
-	fs.StringVar(&o.reportAgent, "report-agent", "", "Only report specified agent - empty means report to all agents (effective for github only)")
+	fs.IntVar(&o.slackWorkers, "slack-workers", 0, "Number of Slack report workers (0 means disabled)")
+	fs.StringVar(&o.slackTokenFile, "slack-token-file", "", "Path to a Slack token file")
+	fs.StringVar(&o.reportAgent, "report-agent", "", "Only report specified agent - empty means report to all agents (effective for github and Slack only)")
 
 	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
 	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
 
 	// TODO(krzyzacy): implement dryrun for gerrit/pubsub
-	fs.BoolVar(&o.dryrun, "dry-run", false, "Run in dry-run mode, not doing actual report (effective for github only)")
+	fs.BoolVar(&o.dryrun, "dry-run", false, "Run in dry-run mode, not doing actual report (effective for github and Slack only)")
 
 	o.github.AddFlags(fs)
 	o.client.AddFlags(fs)
@@ -126,9 +146,7 @@ func (o *options) parseArgs(fs *flag.FlagSet, args []string) error {
 }
 
 func parseOptions() options {
-	o := options{
-		gerritProjects: gerritclient.ProjectsFlag{},
-	}
+	var o options
 
 	if err := o.parseArgs(flag.CommandLine, os.Args[1:]); err != nil {
 		logrus.WithError(err).Fatal("Invalid flag options")
@@ -138,11 +156,9 @@ func parseOptions() options {
 }
 
 func main() {
-	o := parseOptions()
+	logrusutil.ComponentInit("crier")
 
-	logrus.SetFormatter(
-		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "crier"}),
-	)
+	o := parseOptions()
 
 	pjutil.ServePProf()
 
@@ -163,6 +179,28 @@ func main() {
 
 	// track all worker status before shutdown
 	wg := &sync.WaitGroup{}
+
+	if o.slackWorkers > 0 {
+		if cfg().SlackReporter == nil {
+			logrus.Fatal("slackreporter is enabled but has no config")
+		}
+		slackConfig := func() *config.SlackReporter {
+			return cfg().SlackReporter
+		}
+		slackReporter, err := slackreporter.New(slackConfig, o.dryrun, o.slackTokenFile)
+		if err != nil {
+			logrus.WithError(err).Fatal("failed to create slackreporter")
+		}
+		controllers = append(
+			controllers,
+			crier.NewController(
+				prowjobClientset,
+				kube.RateLimiter(slackReporter.GetName()),
+				prowjobInformerFactory.Prow().V1().ProwJobs(),
+				slackReporter,
+				o.slackWorkers,
+				wg))
+	}
 
 	if o.gerritWorkers > 0 {
 		informer := prowjobInformerFactory.Prow().V1().ProwJobs()

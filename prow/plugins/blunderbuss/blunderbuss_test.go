@@ -17,15 +17,21 @@ limitations under the License.
 package blunderbuss
 
 import (
+	"context"
 	"errors"
+	"io/ioutil"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
+	githubql "github.com/shurcooL/githubv4"
 	"github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/yaml"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/plugins"
 	"k8s.io/test-infra/prow/repoowners"
@@ -76,6 +82,18 @@ func (c *fakeGitHubClient) GetPullRequest(org, repo string, num int) (*github.Pu
 	return c.pr, nil
 }
 
+func (f *fakeGitHubClient) Query(ctx context.Context, q interface{}, vars map[string]interface{}) error {
+	sq, ok := q.(*githubAvailabilityQuery)
+	if !ok {
+		return errors.New("unexpected query type")
+	}
+	sq.User.Login = vars["user"].(githubql.String)
+	if sq.User.Login == githubql.String("busy-user") {
+		sq.User.Status.IndicatesLimitedAvailability = githubql.Boolean(true)
+	}
+	return nil
+}
+
 type fakeRepoownersClient struct {
 	foc *fakeOwnersClient
 }
@@ -91,6 +109,7 @@ type fakeOwnersClient struct {
 	reviewers         map[string]sets.String
 	requiredReviewers map[string]sets.String
 	leafReviewers     map[string]sets.String
+	dirBlacklist      []*regexp.Regexp
 }
 
 func (foc *fakeOwnersClient) Approvers(path string) sets.String {
@@ -127,6 +146,40 @@ func (foc *fakeOwnersClient) FindLabelsForFile(path string) sets.String {
 
 func (foc *fakeOwnersClient) IsNoParentOwners(path string) bool {
 	return false
+}
+
+func (foc *fakeOwnersClient) ParseSimpleConfig(path string) (repoowners.SimpleConfig, error) {
+	dir := filepath.Dir(path)
+	for _, re := range foc.dirBlacklist {
+		if re.MatchString(dir) {
+			return repoowners.SimpleConfig{}, filepath.SkipDir
+		}
+	}
+
+	b, err := ioutil.ReadFile(path)
+	if err != nil {
+		return repoowners.SimpleConfig{}, err
+	}
+	full := new(repoowners.SimpleConfig)
+	err = yaml.Unmarshal(b, full)
+	return *full, err
+}
+
+func (foc *fakeOwnersClient) ParseFullConfig(path string) (repoowners.FullConfig, error) {
+	dir := filepath.Dir(path)
+	for _, re := range foc.dirBlacklist {
+		if re.MatchString(dir) {
+			return repoowners.FullConfig{}, filepath.SkipDir
+		}
+	}
+
+	b, err := ioutil.ReadFile(path)
+	if err != nil {
+		return repoowners.FullConfig{}, err
+	}
+	full := new(repoowners.FullConfig)
+	err = yaml.Unmarshal(b, full)
+	return *full, err
 }
 
 var (
@@ -264,7 +317,7 @@ func TestHandleWithExcludeApproversOnlyReviewers(t *testing.T) {
 
 		if err := handle(
 			fghc, froc, logrus.WithField("plugin", PluginName),
-			&tc.reviewerCount, nil, tc.maxReviewerCount, true, &repo, &pr,
+			&tc.reviewerCount, nil, tc.maxReviewerCount, true, false, &repo, &pr,
 		); err != nil {
 			t.Errorf("[%s] unexpected error from handle: %v", tc.name, err)
 			continue
@@ -306,7 +359,7 @@ func TestHandleWithoutExcludeApproversNoReviewers(t *testing.T) {
 
 		if err := handle(
 			fghc, froc, logrus.WithField("plugin", PluginName),
-			&tc.reviewerCount, nil, tc.maxReviewerCount, false, &repo, &pr,
+			&tc.reviewerCount, nil, tc.maxReviewerCount, false, false, &repo, &pr,
 		); err != nil {
 			t.Errorf("[%s] unexpected error from handle: %v", tc.name, err)
 			continue
@@ -426,7 +479,7 @@ func TestHandleWithoutExcludeApproversMixed(t *testing.T) {
 		fghc := newFakeGitHubClient(&pr, tc.filesChanged)
 		if err := handle(
 			fghc, froc, logrus.WithField("plugin", PluginName),
-			&tc.reviewerCount, nil, tc.maxReviewerCount, false, &repo, &pr,
+			&tc.reviewerCount, nil, tc.maxReviewerCount, false, false, &repo, &pr,
 		); err != nil {
 			t.Errorf("[%s] unexpected error from handle: %v", tc.name, err)
 			continue
@@ -529,7 +582,7 @@ func TestHandleOld(t *testing.T) {
 
 			err := handle(
 				fghc, froc, logrus.WithField("plugin", PluginName),
-				nil, &tc.reviewerCount, 0, false, &repo, &pr,
+				nil, &tc.reviewerCount, 0, false, false, &repo, &pr,
 			)
 			if err != nil {
 				t.Fatalf("unexpected error from handle: %v", err)
@@ -779,5 +832,81 @@ func TestHelpProvider(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPopActiveReviewer checks to ensure that no matter how hard we try, we
+// never assign a user that has their availability marked as busy.
+func TestPopActiveReviewer(t *testing.T) {
+	froc := &fakeRepoownersClient{
+		foc: &fakeOwnersClient{
+			owners: map[string]string{
+				"a.go":  "1",
+				"b.go":  "2",
+				"bb.go": "3",
+				"c.go":  "4",
+			},
+			approvers: map[string]sets.String{
+				"a.go": sets.NewString("alice"),
+				"b.go": sets.NewString("brad"),
+				"c.go": sets.NewString("busy-user"),
+			},
+			leafApprovers: map[string]sets.String{
+				"a.go": sets.NewString("alice"),
+				"b.go": sets.NewString("brad"),
+				"c.go": sets.NewString("busy-user"),
+			},
+			reviewers: map[string]sets.String{
+				"a.go": sets.NewString("alice"),
+				"b.go": sets.NewString("brad"),
+				"c.go": sets.NewString("busy-user"),
+			},
+			leafReviewers: map[string]sets.String{
+				"a.go": sets.NewString("alice"),
+				"b.go": sets.NewString("brad"),
+				"c.go": sets.NewString("busy-user"),
+			},
+		},
+	}
+
+	var testcases = []struct {
+		name                       string
+		filesChanged               []string
+		reviewerCount              int
+		maxReviewerCount           int
+		expectedRequested          []string
+		alternateExpectedRequested []string
+	}{
+		{
+			name:              "request three reviewers, only receive two, never get the busy user",
+			filesChanged:      []string{"a.go", "b.go", "c.go"},
+			reviewerCount:     3,
+			expectedRequested: []string{"alice", "brad"},
+		},
+	}
+	for _, tc := range testcases {
+		pr := github.PullRequest{Number: 5, User: github.User{Login: "author"}}
+		repo := github.Repo{Owner: github.User{Login: "org"}, Name: "repo"}
+		fghc := newFakeGitHubClient(&pr, tc.filesChanged)
+		if err := handle(
+			fghc, froc, logrus.WithField("plugin", PluginName),
+			&tc.reviewerCount, nil, tc.maxReviewerCount, false, true, &repo, &pr,
+		); err != nil {
+			t.Errorf("[%s] unexpected error from handle: %v", tc.name, err)
+			continue
+		}
+
+		sort.Strings(fghc.requested)
+		sort.Strings(tc.expectedRequested)
+		sort.Strings(tc.alternateExpectedRequested)
+		if !reflect.DeepEqual(fghc.requested, tc.expectedRequested) {
+			if len(tc.alternateExpectedRequested) > 0 {
+				if !reflect.DeepEqual(fghc.requested, tc.alternateExpectedRequested) {
+					t.Errorf("[%s] expected the requested reviewers to be %q or %q, but got %q.", tc.name, tc.expectedRequested, tc.alternateExpectedRequested, fghc.requested)
+				}
+				continue
+			}
+			t.Errorf("[%s] expected the requested reviewers to be %q, but got %q.", tc.name, tc.expectedRequested, fghc.requested)
+		}
 	}
 }

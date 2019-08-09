@@ -75,10 +75,11 @@ func TestOptions_Validate(t *testing.T) {
 }
 
 type fakeClient struct {
-	repos    map[string][]github.Repo
-	branches map[string][]github.Branch
-	deleted  map[string]bool
-	updated  map[string]github.BranchProtectionRequest
+	repos             map[string][]github.Repo
+	branches          map[string][]github.Branch
+	deleted           map[string]bool
+	updated           map[string]github.BranchProtectionRequest
+	branchProtections map[string]github.BranchProtection
 }
 
 func (c fakeClient) GetRepo(org string, repo string) (github.Repo, error) {
@@ -124,6 +125,14 @@ func (c fakeClient) GetBranches(org, repo string, onlyProtected bool) ([]github.
 		}
 	}
 	return b, nil
+}
+
+func (c *fakeClient) GetBranchProtection(org, repo, branch string) (*github.BranchProtection, error) {
+	ctx := org + "/" + repo + "=" + branch
+	if bp, ok := c.branchProtections[ctx]; ok {
+		return &bp, nil
+	}
+	return nil, nil
 }
 
 func (c *fakeClient) UpdateBranchProtection(org, repo, branch string, config github.BranchProtectionRequest) error {
@@ -259,15 +268,17 @@ func split(branch string) (string, string, string) {
 
 func TestProtect(t *testing.T) {
 	yes := true
+	no := false
 
 	cases := []struct {
-		name             string
-		branches         []string
-		startUnprotected bool
-		config           string
-		archived         string
-		expected         []requirements
-		errors           int
+		name              string
+		branches          []string
+		startUnprotected  bool
+		config            string
+		archived          string
+		expected          []requirements
+		branchProtections map[string]github.BranchProtection
+		errors            int
 	}{
 		{
 			name: "nothing",
@@ -293,22 +304,28 @@ branch-protection:
 `,
 			expected: []requirements{
 				{
-					Org:     "cfgdef",
-					Repo:    "repo1",
-					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "cfgdef",
+					Repo:   "repo1",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 				{
-					Org:     "cfgdef",
-					Repo:    "repo1",
-					Branch:  "branch",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "cfgdef",
+					Repo:   "repo1",
+					Branch: "branch",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 				{
-					Org:     "cfgdef",
-					Repo:    "repo2",
-					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "cfgdef",
+					Repo:   "repo2",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 			},
 		},
@@ -325,10 +342,12 @@ branch-protection:
 `,
 			expected: []requirements{
 				{
-					Org:     "this",
-					Repo:    "yes",
-					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "this",
+					Repo:   "yes",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 				{
 					Org:     "that",
@@ -337,6 +356,7 @@ branch-protection:
 					Request: nil,
 				},
 			},
+			branchProtections: map[string]github.BranchProtection{"that/no=master": {}},
 		},
 		{
 			name:     "protect all repos when protection configured at org level",
@@ -358,16 +378,19 @@ branch-protection:
 					Repo:   "test-infra",
 					Branch: "master",
 					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
 						RequiredStatusChecks: &github.RequiredStatusChecks{
 							Contexts: []string{"hello-world"},
 						},
 					},
 				},
 				{
-					Org:     "kubernetes",
-					Repo:    "publishing-bot",
-					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "kubernetes",
+					Repo:   "publishing-bot",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 			},
 		},
@@ -428,16 +451,20 @@ branch-protection:
 `,
 			expected: []requirements{
 				{
-					Org:     "org",
-					Repo:    "repo1",
-					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "org",
+					Repo:   "repo1",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 				{
-					Org:     "org",
-					Repo:    "repo1",
-					Branch:  "branch",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "org",
+					Repo:   "repo1",
+					Branch: "branch",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 				{
 					Org:     "org",
@@ -446,6 +473,7 @@ branch-protection:
 					Request: nil,
 				},
 			},
+			branchProtections: map[string]github.BranchProtection{"org/skip=master": {}},
 		},
 		{
 			name:     "protect org but skip a repo due to archival",
@@ -460,16 +488,20 @@ branch-protection:
 			archived: "skip",
 			expected: []requirements{
 				{
-					Org:     "org",
-					Repo:    "repo1",
-					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "org",
+					Repo:   "repo1",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 				{
-					Org:     "org",
-					Repo:    "repo1",
-					Branch:  "branch",
-					Request: &github.BranchProtectionRequest{},
+					Org:    "org",
+					Repo:   "repo1",
+					Branch: "branch",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
 				},
 			},
 		},
@@ -494,6 +526,7 @@ branch-protection:
 					Repo:   "repo",
 					Branch: "master",
 					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
 						RequiredStatusChecks: &github.RequiredStatusChecks{
 							Contexts: []string{"duplicate-context", "hello-world"},
 						},
@@ -532,6 +565,7 @@ branch-protection:
 					Repo:   "repo",
 					Branch: "master",
 					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
 						RequiredStatusChecks: &github.RequiredStatusChecks{
 							Contexts: []string{"config-presubmit", "org-presubmit", "repo-presubmit", "branch-presubmit"},
 						},
@@ -570,7 +604,8 @@ branch-protection:
 					Repo:   "repo",
 					Branch: "master",
 					Request: &github.BranchProtectionRequest{
-						Restrictions: &github.Restrictions{
+						EnforceAdmins: &no,
+						Restrictions: &github.RestrictionsRequest{
 							Users: &[]string{},
 							Teams: &[]string{"config-team", "org-team", "repo-team", "branch-team"},
 						},
@@ -625,16 +660,16 @@ branch-protection:
 							Strict:   true,
 							Contexts: []string{"config-presubmit", "org-presubmit"},
 						},
-						RequiredPullRequestReviews: &github.RequiredPullRequestReviews{
+						RequiredPullRequestReviews: &github.RequiredPullRequestReviewsRequest{
 							DismissStaleReviews:          false,
 							RequireCodeOwnerReviews:      true,
 							RequiredApprovingReviewCount: 3,
-							DismissalRestrictions: github.Restrictions{
+							DismissalRestrictions: github.RestrictionsRequest{
 								Users: &[]string{"bob", "jane"},
 								Teams: &[]string{"oncall", "sres"},
 							},
 						},
-						Restrictions: &github.Restrictions{
+						Restrictions: &github.RestrictionsRequest{
 							Users: &[]string{"cindy"},
 							Teams: &[]string{"config-team", "org-team"},
 						},
@@ -674,6 +709,7 @@ branch-protection:
 					Branch: "unprotected",
 				},
 			},
+			branchProtections: map[string]github.BranchProtection{"parent/child=unprotected": {}},
 		},
 		{
 			name:     "do not unprotect unprotected",
@@ -690,15 +726,181 @@ branch-protection:
 			startUnprotected: true,
 			expected: []requirements{
 				{
-					Org:     "protect",
-					Repo:    "update",
+					Org:    "protect",
+					Repo:   "update",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &no,
+					},
+				},
+			},
+		},
+		{
+			name:     "do not make update request if the branch is already up-to-date",
+			branches: []string{"kubernetes/test-infra=master"},
+			config: `
+branch-protection:
+  enforce_admins: true
+  required_status_checks:
+    contexts:
+    - config-presubmit
+    strict: true
+  required_pull_request_reviews:
+    required_approving_review_count: 3
+    dismiss_stale: false
+    require_code_owner_reviews: true
+    dismissal_restrictions:
+      users:
+      - bob
+      - jane
+      teams:
+      - oncall
+      - sres
+  restrictions:
+    teams:
+    - config-team
+    users:
+    - cindy
+  protect: true
+  orgs:
+    kubernetes:
+      repos:
+        test-infra:
+`,
+			branchProtections: map[string]github.BranchProtection{
+				"kubernetes/test-infra=master": {
+					EnforceAdmins: github.EnforceAdmins{Enabled: true},
+					RequiredStatusChecks: &github.RequiredStatusChecks{
+						Strict:   true,
+						Contexts: []string{"config-presubmit"},
+					},
+					RequiredPullRequestReviews: &github.RequiredPullRequestReviews{
+						DismissStaleReviews:          false,
+						RequireCodeOwnerReviews:      true,
+						RequiredApprovingReviewCount: 3,
+						DismissalRestrictions: &github.Restrictions{
+							Users: []github.User{{Login: "bob"}, {Login: "jane"}},
+							Teams: []github.Team{{Slug: "oncall"}, {Slug: "sres"}},
+						},
+					},
+					Restrictions: &github.Restrictions{
+						Users: []github.User{{Login: "cindy"}},
+						Teams: []github.Team{{Slug: "config-team"}},
+					},
+				},
+			},
+		},
+		{
+			name:     "make request if branch protection is present, but out of date",
+			branches: []string{"kubernetes/test-infra=master"},
+			config: `
+branch-protection:
+  enforce_admins: true
+  required_pull_request_reviews:
+    required_approving_review_count: 3
+  protect: true
+  orgs:
+    kubernetes:
+      repos:
+        test-infra:
+`,
+			branchProtections: map[string]github.BranchProtection{
+				"kubernetes/test-infra=master": {
+					EnforceAdmins: github.EnforceAdmins{Enabled: true},
+					RequiredStatusChecks: &github.RequiredStatusChecks{
+						Strict:   true,
+						Contexts: []string{"config-presubmit"},
+					},
+				},
+			},
+			expected: []requirements{
+				{
+					Org:    "kubernetes",
+					Repo:   "test-infra",
+					Branch: "master",
+					Request: &github.BranchProtectionRequest{
+						EnforceAdmins: &yes,
+						RequiredPullRequestReviews: &github.RequiredPullRequestReviewsRequest{
+							RequiredApprovingReviewCount: 3,
+						},
+					},
+				},
+			},
+		},
+		{
+			name:     "excluded branches are not protected",
+			branches: []string{"kubernetes/test-infra=master", "kubernetes/test-infra=skip"},
+			config: `
+branch-protection:
+  protect: true
+  orgs:
+    kubernetes:
+      repos:
+        test-infra:
+          exclude:
+          - sk.*
+`,
+
+			expected: []requirements{
+				{
+					Org:     "kubernetes",
+					Repo:    "test-infra",
 					Branch:  "master",
-					Request: &github.BranchProtectionRequest{},
+					Request: &github.BranchProtectionRequest{EnforceAdmins: &no},
+				},
+			},
+		},
+		{
+			name:     "org and repo level branch exclusions are combined",
+			branches: []string{"kubernetes/test-infra=master", "kubernetes/test-infra=skip", "kubernetes/test-infra=foobar1"},
+			config: `
+branch-protection:
+  protect: true
+  orgs:
+    kubernetes:
+      exclude:
+      - foo.*
+      repos:
+        test-infra:
+          exclude:
+          - sk.*
+`,
+
+			expected: []requirements{
+				{
+					Org:     "kubernetes",
+					Repo:    "test-infra",
+					Branch:  "master",
+					Request: &github.BranchProtectionRequest{EnforceAdmins: &no},
+				},
+			},
+		},
+		{
+			name:     "explicitly specified branches are not affected by Exclude",
+			branches: []string{"kubernetes/test-infra=master"},
+			config: `
+branch-protection:
+  protect: true
+  orgs:
+    kubernetes:
+      exclude:
+      - master.*
+      repos:
+        test-infra:
+          branches:
+            master:
+`,
+
+			expected: []requirements{
+				{
+					Org:     "kubernetes",
+					Repo:    "test-infra",
+					Branch:  "master",
+					Request: &github.BranchProtectionRequest{EnforceAdmins: &no},
 				},
 			},
 		},
 	}
-
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repos := map[string]map[string]bool{}
@@ -717,8 +919,9 @@ branch-protection:
 				repos[org][repo] = true
 			}
 			fc := fakeClient{
-				branches: branches,
-				repos:    map[string][]github.Repo{},
+				branches:          branches,
+				repos:             map[string][]github.Repo{},
+				branchProtections: tc.branchProtections,
 			}
 			for org, r := range repos {
 				for rname := range r {
@@ -847,5 +1050,440 @@ branch-protection:
 	}
 	if len(actual) != 0 {
 		t.Errorf("expected no updates, got: %v", actual)
+	}
+}
+
+func TestEqualBranchProtection(t *testing.T) {
+	yes := true
+	var testCases = []struct {
+		name     string
+		state    *github.BranchProtection
+		request  *github.BranchProtectionRequest
+		expected bool
+	}{
+		{
+			name:     "neither set matches",
+			expected: true,
+		},
+		{
+			name:     "request unset doesn't match",
+			state:    &github.BranchProtection{},
+			expected: false,
+		},
+		{
+			name:     "state unset doesn't match",
+			request:  &github.BranchProtectionRequest{},
+			expected: false,
+		},
+		{
+			name: "matching requests work",
+			state: &github.BranchProtection{
+				RequiredStatusChecks: &github.RequiredStatusChecks{
+					Strict:   true,
+					Contexts: []string{"a", "b", "c"},
+				},
+				EnforceAdmins: github.EnforceAdmins{
+					Enabled: true,
+				},
+				RequiredPullRequestReviews: &github.RequiredPullRequestReviews{
+					DismissStaleReviews:          true,
+					RequireCodeOwnerReviews:      true,
+					RequiredApprovingReviewCount: 1,
+					DismissalRestrictions: &github.Restrictions{
+						Users: []github.User{{Login: "user"}},
+						Teams: []github.Team{{Slug: "team"}},
+					},
+				},
+				Restrictions: &github.Restrictions{
+					Users: []github.User{{Login: "user"}},
+					Teams: []github.Team{{Slug: "team"}},
+				},
+			},
+			request: &github.BranchProtectionRequest{
+				RequiredStatusChecks: &github.RequiredStatusChecks{
+					Strict:   true,
+					Contexts: []string{"a", "b", "c"},
+				},
+				EnforceAdmins: &yes,
+				RequiredPullRequestReviews: &github.RequiredPullRequestReviewsRequest{
+					DismissStaleReviews:          true,
+					RequireCodeOwnerReviews:      true,
+					RequiredApprovingReviewCount: 1,
+					DismissalRestrictions: github.RestrictionsRequest{
+						Users: &[]string{"user"},
+						Teams: &[]string{"team"},
+					},
+				},
+				Restrictions: &github.RestrictionsRequest{
+					Users: &[]string{"user"},
+					Teams: &[]string{"team"},
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, testCase := range testCases {
+		if actual, expected := equalBranchProtections(testCase.state, testCase.request), testCase.expected; actual != expected {
+			t.Errorf("%s: didn't compute equality correctly, expected %v got %v", testCase.name, expected, actual)
+		}
+	}
+}
+
+func TestEqualStatusChecks(t *testing.T) {
+	var testCases = []struct {
+		name     string
+		state    *github.RequiredStatusChecks
+		request  *github.RequiredStatusChecks
+		expected bool
+	}{
+		{
+			name:     "neither set matches",
+			expected: true,
+		},
+		{
+			name:     "request unset doesn't match",
+			state:    &github.RequiredStatusChecks{},
+			expected: false,
+		},
+		{
+			name:     "state unset doesn't match",
+			request:  &github.RequiredStatusChecks{},
+			expected: false,
+		},
+		{
+			name: "matching requests work",
+			state: &github.RequiredStatusChecks{
+				Strict:   true,
+				Contexts: []string{"a", "b", "c"},
+			},
+
+			request: &github.RequiredStatusChecks{
+				Strict:   true,
+				Contexts: []string{"a", "b", "c"},
+			},
+			expected: true,
+		},
+		{
+			name: "not matching on strict",
+			state: &github.RequiredStatusChecks{
+				Strict:   true,
+				Contexts: []string{"a", "b", "c"},
+			},
+
+			request: &github.RequiredStatusChecks{
+				Strict:   false,
+				Contexts: []string{"a", "b", "c"},
+			},
+			expected: false,
+		},
+		{
+			name: "not matching on contexts",
+			state: &github.RequiredStatusChecks{
+				Strict:   true,
+				Contexts: []string{"a", "b", "d"},
+			},
+
+			request: &github.RequiredStatusChecks{
+				Strict:   true,
+				Contexts: []string{"a", "b", "c"},
+			},
+			expected: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		if actual, expected := equalRequiredStatusChecks(testCase.state, testCase.request), testCase.expected; actual != expected {
+			t.Errorf("%s: didn't compute equality correctly, expected %v got %v", testCase.name, expected, actual)
+		}
+	}
+}
+
+func TestEqualStringSlices(t *testing.T) {
+	var testCases = []struct {
+		name     string
+		state    *[]string
+		request  *[]string
+		expected bool
+	}{
+		{
+			name:     "no slices",
+			expected: true,
+		},
+		{
+			name:     "a unset doesn't match",
+			state:    &[]string{},
+			expected: false,
+		},
+		{
+			name:     "b unset doesn't match",
+			request:  &[]string{},
+			expected: false,
+		},
+		{
+			name:     "matching slices work",
+			state:    &[]string{"a", "b", "c"},
+			request:  &[]string{"a", "b", "c"},
+			expected: true,
+		},
+		{
+			name:     "ordering doesn't matter",
+			state:    &[]string{"a", "c", "b"},
+			request:  &[]string{"a", "b", "c"},
+			expected: true,
+		},
+		{
+			name:     "unequal slices don't match",
+			state:    &[]string{"a", "b"},
+			request:  &[]string{"a", "b", "c"},
+			expected: false,
+		},
+		{
+			name:     "disoint slices don't match",
+			state:    &[]string{"e", "f", "g"},
+			request:  &[]string{"a", "b", "c"},
+			expected: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		if actual, expected := equalStringSlices(testCase.state, testCase.request), testCase.expected; actual != expected {
+			t.Errorf("%s: didn't compute equality correctly, expected %v got %v", testCase.name, expected, actual)
+		}
+	}
+}
+
+func TestEqualAdminEnforcement(t *testing.T) {
+	yes, no := true, false
+	var testCases = []struct {
+		name     string
+		state    github.EnforceAdmins
+		request  *bool
+		expected bool
+	}{
+		{
+			name:     "unset request matches no enforcement",
+			state:    github.EnforceAdmins{Enabled: false},
+			expected: true,
+		},
+		{
+			name:     "set request matches enforcement",
+			state:    github.EnforceAdmins{Enabled: false},
+			request:  &no,
+			expected: true,
+		},
+		{
+			name:     "set request doesn't match enforcement",
+			state:    github.EnforceAdmins{Enabled: false},
+			request:  &yes,
+			expected: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		if actual, expected := equalAdminEnforcement(testCase.state, testCase.request), testCase.expected; actual != expected {
+			t.Errorf("%s: didn't compute equality correctly, expected %v got %v", testCase.name, expected, actual)
+		}
+	}
+}
+
+func TestEqualRequiredPullRequestReviews(t *testing.T) {
+	var testCases = []struct {
+		name     string
+		state    *github.RequiredPullRequestReviews
+		request  *github.RequiredPullRequestReviewsRequest
+		expected bool
+	}{
+		{
+			name:     "neither set matches",
+			expected: true,
+		},
+		{
+			name:     "request unset doesn't match",
+			state:    &github.RequiredPullRequestReviews{},
+			expected: false,
+		},
+		{
+			name:     "state unset doesn't match",
+			request:  &github.RequiredPullRequestReviewsRequest{},
+			expected: false,
+		},
+		{
+			name: "matching requests work",
+			state: &github.RequiredPullRequestReviews{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+				DismissalRestrictions: &github.Restrictions{
+					Users: []github.User{{Login: "user"}},
+					Teams: []github.Team{{Slug: "team"}},
+				},
+			},
+			request: &github.RequiredPullRequestReviewsRequest{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+				DismissalRestrictions: github.RestrictionsRequest{
+					Users: &[]string{"user"},
+					Teams: &[]string{"team"},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "not matching on dismissal",
+			state: &github.RequiredPullRequestReviews{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+			},
+			request: &github.RequiredPullRequestReviewsRequest{
+				DismissStaleReviews:          false,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+			},
+			expected: false,
+		},
+		{
+			name: "not matching on reviews",
+			state: &github.RequiredPullRequestReviews{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+			},
+			request: &github.RequiredPullRequestReviewsRequest{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      false,
+				RequiredApprovingReviewCount: 1,
+			},
+			expected: false,
+		},
+		{
+			name: "not matching on count",
+			state: &github.RequiredPullRequestReviews{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+			},
+			request: &github.RequiredPullRequestReviewsRequest{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 2,
+			},
+			expected: false,
+		},
+		{
+			name: "not matching on restrictions",
+			state: &github.RequiredPullRequestReviews{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+				DismissalRestrictions: &github.Restrictions{
+					Users: []github.User{{Login: "user"}},
+					Teams: []github.Team{{Slug: "team"}},
+				},
+			},
+			request: &github.RequiredPullRequestReviewsRequest{
+				DismissStaleReviews:          true,
+				RequireCodeOwnerReviews:      true,
+				RequiredApprovingReviewCount: 1,
+				DismissalRestrictions: github.RestrictionsRequest{
+					Users: &[]string{"other"},
+					Teams: &[]string{"team"},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		if actual, expected := equalRequiredPullRequestReviews(testCase.state, testCase.request), testCase.expected; actual != expected {
+			t.Errorf("%s: didn't compute equality correctly, expected %v got %v", testCase.name, expected, actual)
+		}
+	}
+}
+
+func TestEqualRestrictions(t *testing.T) {
+	var testCases = []struct {
+		name     string
+		state    *github.Restrictions
+		request  *github.RestrictionsRequest
+		expected bool
+	}{
+		{
+			name:     "neither set matches",
+			expected: true,
+		},
+		{
+			name:     "request unset doesn't match",
+			state:    &github.Restrictions{},
+			expected: false,
+		},
+		{
+			name: "matching requests work",
+			state: &github.Restrictions{
+				Users: []github.User{{Login: "user"}},
+				Teams: []github.Team{{Slug: "team"}},
+			},
+			request: &github.RestrictionsRequest{
+				Users: &[]string{"user"},
+				Teams: &[]string{"team"},
+			},
+			expected: true,
+		},
+		{
+			name: "user login casing is ignored",
+			state: &github.Restrictions{
+				Users: []github.User{{Login: "User"}, {Login: "OTHer"}},
+				Teams: []github.Team{{Slug: "team"}},
+			},
+			request: &github.RestrictionsRequest{
+				Users: &[]string{"uSer", "oThER"},
+				Teams: &[]string{"team"},
+			},
+			expected: true,
+		},
+		{
+			name: "not matching on users",
+			state: &github.Restrictions{
+				Users: []github.User{{Login: "user"}},
+				Teams: []github.Team{{Slug: "team"}},
+			},
+			request: &github.RestrictionsRequest{
+				Users: &[]string{"other"},
+				Teams: &[]string{"team"},
+			},
+			expected: false,
+		},
+		{
+			name: "not matching on team",
+			state: &github.Restrictions{
+				Users: []github.User{{Login: "user"}},
+				Teams: []github.Team{{Slug: "team"}},
+			},
+			request: &github.RestrictionsRequest{
+				Users: &[]string{"user"},
+				Teams: &[]string{"other"},
+			},
+			expected: false,
+		},
+		{
+			name:     "both unset",
+			request:  &github.RestrictionsRequest{},
+			expected: true,
+		},
+		{
+			name: "partially unset",
+			request: &github.RestrictionsRequest{
+				Teams: &[]string{"team"},
+			},
+			expected: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		if actual, expected := equalRestrictions(testCase.state, testCase.request), testCase.expected; actual != expected {
+			t.Errorf("%s: didn't compute equality correctly, expected %v got %v", testCase.name, expected, actual)
+		}
 	}
 }

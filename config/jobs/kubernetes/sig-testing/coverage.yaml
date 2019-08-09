@@ -20,10 +20,10 @@ periodics:
     base_ref: master
     path_alias: k8s.io/release
   decoration_config:
-    timeout: 10800000000000 # 3 hours
+    timeout: 6h
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       command:
       - runner.sh
       - bash
@@ -39,8 +39,8 @@ periodics:
           --stage=gs://kubernetes-release-dev/ci/ci-kubernetes-conformance-coverage \
           --gcp-zone=us-west1-b \
           --provider=gce \
-          --timeout=150m \
-          --test_args="--ginkgo.focus=\[Conformance\] --ginkgo.skip=Alpha|\[(Disruptive|Feature:[^\]]+|Flaky)\]"
+          --timeout=300m \
+          --test_args="--ginkgo.focus=\[Conformance\]"
         cd ../test-infra
         bazel run //gopherage -- merge "${ARTIFACTS}"/before/**/*.cov > "${ARTIFACTS}/before/merged.cov"
         bazel run //gopherage -- merge "${ARTIFACTS}"/after/**/*.cov > "${ARTIFACTS}/after/merged.cov"
@@ -58,6 +58,9 @@ periodics:
       securityContext:
         privileged: true
 # coverage for same tests that run in ci-kubernetes-e2e-gci-gce
+  annotations:
+    testgrid-dashboards: sig-testing-canaries
+    description: build instrumented kubernetes, run conformance tests, generate line coverage using gopherage
 - interval: 1h
   name: ci-kubernetes-coverage-e2e-gci-gce
   decorate: true
@@ -79,10 +82,10 @@ periodics:
     base_ref: master
     path_alias: k8s.io/release
   decoration_config:
-    timeout: 10800000000000 # 3 hours
+    timeout: 3h
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       command:
       - runner.sh
       - bash
@@ -121,3 +124,6 @@ periodics:
         value: "n"
       securityContext:
         privileged: true
+  annotations:
+    testgrid-dashboards: sig-testing-canaries
+    description: build instrumented kubernetes, run (non-slow/serial/disruptive/flaky/feature) e2e tests, generate line coverage using gopherage

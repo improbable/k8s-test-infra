@@ -1,16 +1,14 @@
-import "dialog-polyfill";
+import dialogPolyfill from "dialog-polyfill";
 
 import {Context} from '../api/github';
 import {Label, PullRequest, UserData} from '../api/pr';
 import {Job, JobState} from '../api/prow';
 import {Blocker, TideData, TidePool, TideQuery as ITideQuery} from '../api/tide';
-import {tidehistory} from '../common/common';
+import {getCookieByName, tidehistory} from '../common/common';
 
 declare const tideData: TideData;
 declare const allBuilds: Job[];
-declare const dialogPolyfill: {
-  registerDialog(element: HTMLDialogElement): void;
-};
+declare const csrfToken: string;
 
 type UnifiedState = JobState | "expected" | "error" | "failure" | "pending" | "success";
 
@@ -118,6 +116,7 @@ function createXMLHTTPRequest(fulfillFn: (request: XMLHttpRequest) => any, error
     request.withCredentials = true;
     request.open("POST", url, true);
     request.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
+    request.setRequestHeader("X-CSRF-Token", csrfToken);
 
     return request;
 }
@@ -178,24 +177,6 @@ function onLoadQuery(): string {
     const val = params[0].slice("query=".length);
     if (val && val !== "") {
         return decodeURIComponent(val.replace(/\+/g, ' '));
-    }
-    return "";
-}
-
-/**
- * Gets cookie by its name.
- */
-function getCookieByName(name: string): string {
-    if (!document.cookie) {
-        return "";
-    }
-    const cookies = decodeURIComponent(document.cookie).split(";");
-    for (const cookie of cookies) {
-        const c = cookie.trim();
-        const pref = name + "=";
-        if (c.indexOf(pref) === 0) {
-            return c.slice(pref.length);
-        }
     }
     return "";
 }
@@ -387,8 +368,10 @@ function getFullPRContext(builds: Job[], contexts: Context[]): UnifiedContext[] 
  */
 function loadPrStatus(prData: UserData): void {
     const tideQueries: TideQuery[] = [];
-    for (const query of tideData.TideQueries) {
-        tideQueries.push(new TideQuery(query));
+    if (tideData.TideQueries) {
+        for (const query of tideData.TideQueries) {
+            tideQueries.push(new TideQuery(query));
+        }
     }
 
     const container = document.querySelector("#pr-container")!;
@@ -1157,7 +1140,7 @@ function createPRCard(pr: PullRequest, builds: UnifiedContext[] = [], queries: P
  * Redirect to initiate github login flow.
  */
 function forceGitHubLogin(): void {
-    window.location.href = window.location.origin + "/github-login";
+    window.location.href = window.location.origin + "/github-login?dest=%2Fpr";
 }
 
 type VagueState = "succeeded" | "failed" | "pending" | "unknown";

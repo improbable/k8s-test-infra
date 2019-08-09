@@ -65,6 +65,7 @@ type Spyglass struct {
 // LensRequest holds data sent by a view
 type LensRequest struct {
 	Source    string   `json:"src"`
+	Index     int      `json:"index"`
 	Artifacts []string `json:"artifacts"`
 }
 
@@ -76,12 +77,12 @@ type ExtraLink struct {
 }
 
 // New constructs a Spyglass object from a JobAgent, a config.Agent, and a storage Client.
-func New(ja *jobs.JobAgent, cfg config.Getter, c *storage.Client, ctx context.Context) *Spyglass {
+func New(ja *jobs.JobAgent, cfg config.Getter, c *storage.Client, gcsCredsFile string, ctx context.Context) *Spyglass {
 	return &Spyglass{
 		JobAgent:              ja,
 		config:                cfg,
 		PodLogArtifactFetcher: NewPodLogArtifactFetcher(ja),
-		GCSArtifactFetcher:    NewGCSArtifactFetcher(c),
+		GCSArtifactFetcher:    NewGCSArtifactFetcher(c, gcsCredsFile),
 		testgrid: &TestGrid{
 			conf:   cfg,
 			client: c,
@@ -95,23 +96,25 @@ func (sg *Spyglass) Start() {
 }
 
 // Lenses gets all views of all artifact files matching each regexp with a registered lens
-func (s *Spyglass) Lenses(matchCache map[string][]string) []lenses.Lens {
-	ls := []lenses.Lens{}
-	for lensName, matches := range matchCache {
-		if len(matches) == 0 {
-			continue
-		}
-		lens, err := lenses.GetLens(lensName)
+func (s *Spyglass) Lenses(lensConfigIndexes []int) (orderedIndexes []int, lensMap map[int]lenses.Lens) {
+	type ld struct {
+		lens  lenses.Lens
+		index int
+	}
+	var ls []ld
+	for _, lensIndex := range lensConfigIndexes {
+		lfc := s.config().Deck.Spyglass.Lenses[lensIndex]
+		lens, err := lenses.GetLens(lfc.Lens.Name)
 		if err != nil {
 			logrus.WithField("lensName", lens).WithError(err).Error("Could not find artifact lens")
 		} else {
-			ls = append(ls, lens)
+			ls = append(ls, ld{lens, lensIndex})
 		}
 	}
 	// Make sure lenses are rendered in order by ascending priority
 	sort.Slice(ls, func(i, j int) bool {
-		iconf := ls[i].Config()
-		jconf := ls[j].Config()
+		iconf := ls[i].lens.Config()
+		jconf := ls[j].lens.Config()
 		iname := iconf.Name
 		jname := jconf.Name
 		pi := iconf.Priority
@@ -121,7 +124,14 @@ func (s *Spyglass) Lenses(matchCache map[string][]string) []lenses.Lens {
 		}
 		return pi < pj
 	})
-	return ls
+
+	lensMap = map[int]lenses.Lens{}
+	for _, l := range ls {
+		orderedIndexes = append(orderedIndexes, l.index)
+		lensMap[l.index] = l.lens
+	}
+
+	return orderedIndexes, lensMap
 }
 
 func (s *Spyglass) ResolveSymlink(src string) (string, error) {
@@ -215,6 +225,44 @@ func (s *Spyglass) JobPath(src string) (string, error) {
 	default:
 		return "", fmt.Errorf("unrecognized key type for src: %v", src)
 	}
+}
+
+// ProwJobName returns a link to the YAML for the job specified in src.
+// If no job is found, it returns an empty string and nil error.
+func (s *Spyglass) ProwJobName(src string) (string, error) {
+	src = strings.TrimSuffix(src, "/")
+	keyType, key, err := splitSrc(src)
+	if err != nil {
+		return "", fmt.Errorf("error parsing src: %v", src)
+	}
+	split := strings.Split(key, "/")
+	var jobName string
+	var buildID string
+	switch keyType {
+	case gcsKeyType:
+		if len(split) < 4 {
+			return "", fmt.Errorf("invalid key %s: expected <bucket-name>/<log-type>/.../<job-name>/<build-id>", key)
+		}
+		jobName = split[len(split)-2]
+		buildID = split[len(split)-1]
+	case prowKeyType:
+		if len(split) < 2 {
+			return "", fmt.Errorf("invalid key %s: expected <job-name>/<build-id>", key)
+		}
+		jobName = split[0]
+		buildID = split[1]
+	default:
+		return "", fmt.Errorf("unrecognized key type for src: %v", src)
+	}
+	job, err := s.jobAgent.GetProwJob(jobName, buildID)
+	if err != nil {
+		if jobs.IsErrProwJobNotFound(err) {
+			return "", nil
+		} else {
+			return "", err
+		}
+	}
+	return job.Name, nil
 }
 
 // RunPath returns the path to the GCS directory for the job run specified in src.

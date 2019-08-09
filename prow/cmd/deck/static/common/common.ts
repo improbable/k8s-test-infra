@@ -163,17 +163,21 @@ export namespace tooltip {
     tip.appendChild(tipElem);
     tip.setAttribute("data-mdl-for", elemID);
     tip.classList.add("mdl-tooltip", "mdl-tooltip--large");
+    tip.style.whiteSpace = "normal";
     return tip;
   }
 }
 
 export namespace icon {
-  export function create(iconString: string, tip: string = ""): HTMLAnchorElement {
+  export function create(iconString: string, tip: string = "", onClick?: (this: HTMLElement, ev: MouseEvent) => any): HTMLAnchorElement {
     const i = document.createElement("i");
     i.classList.add("icon-button", "material-icons");
     i.innerHTML = iconString;
     if (tip !== "") {
        i.title = tip;
+    }
+    if (onClick) {
+      i.addEventListener("click", onClick);
     }
 
     const container = document.createElement("a");
@@ -199,4 +203,19 @@ export namespace tidehistory {
     link.href = `/tide-history?author=${encodedAuthor}`;
     return link;
   }
+}
+
+export function getCookieByName(name: string): string {
+  if (!document.cookie) {
+    return "";
+  }
+  const docCookies = decodeURIComponent(document.cookie).split(";");
+  for (const cookie of docCookies) {
+    const c = cookie.trim();
+    const pref = name + "=";
+    if (c.indexOf(pref) === 0) {
+      return c.slice(pref.length);
+    }
+  }
+  return "";
 }

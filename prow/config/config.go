@@ -20,6 +20,7 @@ package config
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -27,6 +28,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -34,18 +37,27 @@ import (
 	"github.com/sirupsen/logrus"
 	cron "gopkg.in/robfig/cron.v2"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 
 	buildapi "github.com/knative/build/pkg/apis/build/v1alpha1"
+	pipelinev1alpha1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1alpha1"
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
-	"k8s.io/test-infra/prow/config/org"
+	"k8s.io/test-infra/prow/git"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pod-utils/decorate"
 	"k8s.io/test-infra/prow/pod-utils/downwardapi"
+)
+
+const (
+	// DefaultJobTimeout represents the default deadline for a prow job.
+	DefaultJobTimeout = 24 * time.Hour
+
+	ProwImplicitGitResource = "PROW_IMPLICIT_GIT_REF"
 )
 
 // Config is a read-only snapshot of the config.
@@ -68,14 +80,14 @@ type JobConfig struct {
 
 // ProwConfig is config for all prow controllers
 type ProwConfig struct {
-	Tide             Tide                  `json:"tide,omitempty"`
-	Plank            Plank                 `json:"plank,omitempty"`
-	Sinker           Sinker                `json:"sinker,omitempty"`
-	Deck             Deck                  `json:"deck,omitempty"`
-	BranchProtection BranchProtection      `json:"branch-protection,omitempty"`
-	Orgs             map[string]org.Config `json:"orgs,omitempty"`
-	Gerrit           Gerrit                `json:"gerrit,omitempty"`
-	GitHubReporter   GitHubReporter        `json:"github_reporter,omitempty"`
+	Tide             Tide             `json:"tide,omitempty"`
+	Plank            Plank            `json:"plank,omitempty"`
+	Sinker           Sinker           `json:"sinker,omitempty"`
+	Deck             Deck             `json:"deck,omitempty"`
+	BranchProtection BranchProtection `json:"branch-protection,omitempty"`
+	Gerrit           Gerrit           `json:"gerrit,omitempty"`
+	GitHubReporter   GitHubReporter   `json:"github_reporter,omitempty"`
+	SlackReporter    *SlackReporter   `json:"slack_reporter,omitempty"`
 
 	// TODO: Move this out of the main config.
 	JenkinsOperators []JenkinsOperator `json:"jenkins_operators,omitempty"`
@@ -104,8 +116,8 @@ type ProwConfig struct {
 	// PushGateway is a prometheus push gateway.
 	PushGateway PushGateway `json:"push_gateway,omitempty"`
 
-	// OwnersDirBlacklist is used to configure which directories to ignore when
-	// searching for OWNERS{,_ALIAS} files in a repo.
+	// OwnersDirBlacklist is used to configure regular expressions matching directories
+	// to ignore when searching for OWNERS{,_ALIAS} files in a repo.
 	OwnersDirBlacklist OwnersDirBlacklist `json:"owners_dir_blacklist,omitempty"`
 
 	// Pub/Sub Subscriptions that we want to listen to
@@ -118,19 +130,54 @@ type ProwConfig struct {
 	// found, or have another generic issue. The default that will be used if this is not set
 	// is: https://github.com/kubernetes/test-infra/issues
 	StatusErrorLink string `json:"status_error_link,omitempty"`
+
+	// DefaultJobTimeout this is default deadline for prow jobs. This value is used when
+	// no timeout is configured at the job level. This value is set to 24 hours.
+	DefaultJobTimeout *metav1.Duration `json:"default_job_timeout,omitempty"`
 }
 
-// OwnersDirBlacklist is used to configure which directories to ignore when
-// searching for OWNERS{,_ALIAS} files in a repo.
+// PresubmitsStatic returns the presubmits in Prows main config.
+// **Warning:** This does not return dynamic Presubmits configured
+// inside the code repo, hence giving an incomplete view. Use
+// `GetPresubmits` instead if possible.
+func (c *Config) PresubmitsStatic() map[string][]Presubmit {
+	return c.Presubmits
+}
+
+// GetPresubmits will return all presumits for the given identifier.
+// Once https://github.com/kubernetes/test-infra/issues/13370 is resolved, it will
+// also return Presubmits that are versioned inside the tested repo, if that feature
+// is enabled.
+func (c *Config) GetPresubmits(gc *git.Client, identifier, baseSHA string, headRefs ...string) ([]Presubmit, error) {
+	if gc == nil {
+		return nil, errors.New("gitClient is nil")
+	}
+	if identifier == "" {
+		return nil, errors.New("no identifier for repo given")
+	}
+	if baseSHA == "" {
+		return nil, errors.New("baseSHA is empty")
+	}
+	return c.Presubmits[identifier], nil
+}
+
+// OwnersDirBlacklist is used to configure regular expressions matching directories
+// to ignore when searching for OWNERS{,_ALIAS} files in a repo.
 type OwnersDirBlacklist struct {
 	// Repos configures a directory blacklist per repo (or org)
 	Repos map[string][]string `json:"repos"`
-	// Default configures a default blacklist for repos (or orgs) not
-	// specifically configured
+	// Default configures a default blacklist for all repos (or orgs).
+	// Some directories like ".git", "_output" and "vendor/.*/OWNERS"
+	// are already preconfigured to be blacklisted, and need not be included here.
 	Default []string `json:"default"`
+	// By default, some directories like ".git", "_output" and "vendor/.*/OWNERS"
+	// are preconfigured to be blacklisted.
+	// If set, IgnorePreconfiguredDefaults will not add these preconfigured directories
+	// to the blacklist.
+	IgnorePreconfiguredDefaults bool `json:"ignore_preconfigured_defaults,omitempty"`
 }
 
-// DirBlacklist returns directories which are used to ignore when
+// DirBlacklist returns regular expressions matching directories to ignore when
 // searching for OWNERS{,_ALIAS} files in a repo.
 func (ownersDirBlacklist OwnersDirBlacklist) DirBlacklist(org, repo string) (blacklist []string) {
 	blacklist = append(blacklist, ownersDirBlacklist.Default...)
@@ -140,6 +187,11 @@ func (ownersDirBlacklist OwnersDirBlacklist) DirBlacklist(org, repo string) (bla
 	if bl, ok := ownersDirBlacklist.Repos[org+"/"+repo]; ok {
 		blacklist = append(blacklist, bl...)
 	}
+
+	preconfiguredDefaults := []string{"\\.git$", "_output$", "vendor/.*/.*"}
+	if !ownersDirBlacklist.IgnorePreconfiguredDefaults {
+		blacklist = append(blacklist, preconfiguredDefaults...)
+	}
 	return
 }
 
@@ -148,11 +200,11 @@ type PushGateway struct {
 	// Endpoint is the location of the prometheus pushgateway
 	// where prow will push metrics to.
 	Endpoint string `json:"endpoint,omitempty"`
-	// IntervalString compiles into Interval at load time.
-	IntervalString string `json:"interval,omitempty"`
 	// Interval specifies how often prow will push metrics
 	// to the pushgateway. Defaults to 1m.
-	Interval time.Duration `json:"-"`
+	Interval *metav1.Duration `json:"interval,omitempty"`
+	// ServeMetrics tells if or not the components serve metrics
+	ServeMetrics bool `json:"serve_metrics"`
 }
 
 // Controller holds configuration applicable to all agent-specific
@@ -189,11 +241,12 @@ type Controller struct {
 // Plank is config for the plank controller.
 type Plank struct {
 	Controller `json:",inline"`
-	// PodPendingTimeoutString compiles into PodPendingTimeout at load time.
-	PodPendingTimeoutString string `json:"pod_pending_timeout,omitempty"`
 	// PodPendingTimeout is after how long the controller will perform a garbage
 	// collection on pending pods. Defaults to one day.
-	PodPendingTimeout time.Duration `json:"-"`
+	PodPendingTimeout *metav1.Duration `json:"pod_pending_timeout,omitempty"`
+	// PodRunningTimeout is after how long the controller will abort a prowjob pod
+	// stuck in running state. Defaults to two days.
+	PodRunningTimeout *metav1.Duration `json:"pod_running_timeout,omitempty"`
 	// DefaultDecorationConfig are defaults for shared fields for ProwJobs
 	// that request to have their PodSpecs decorated
 	DefaultDecorationConfig *prowapi.DecorationConfig `json:"default_decoration_config,omitempty"`
@@ -223,8 +276,7 @@ func (p Plank) GetJobURLPrefix(refs *prowapi.Refs) string {
 // Gerrit is config for the gerrit controller.
 type Gerrit struct {
 	// TickInterval is how often we do a sync with binded gerrit instance
-	TickIntervalString string        `json:"tick_interval,omitempty"`
-	TickInterval       time.Duration `json:"-"`
+	TickInterval *metav1.Duration `json:"tick_interval,omitempty"`
 	// RateLimit defines how many changes to query per gerrit API call
 	// default is 5
 	RateLimit int `json:"ratelimit,omitempty"`
@@ -251,37 +303,57 @@ type GitHubReporter struct {
 	// JobTypesToReport is used to determine which type of prowjob
 	// should be reported to github
 	//
-	// defaults to presubmit job only.
-	// Will default to both presubmit and postsubmit jobs by April.1st.2019
+	// defaults to both presubmit and postsubmit jobs.
 	JobTypesToReport []prowapi.ProwJobType `json:"job_types_to_report,omitempty"`
 }
 
 // Sinker is config for the sinker controller.
 type Sinker struct {
-	// ResyncPeriodString compiles into ResyncPeriod at load time.
-	ResyncPeriodString string `json:"resync_period,omitempty"`
 	// ResyncPeriod is how often the controller will perform a garbage
 	// collection. Defaults to one hour.
-	ResyncPeriod time.Duration `json:"-"`
-	// MaxProwJobAgeString compiles into MaxProwJobAge at load time.
-	MaxProwJobAgeString string `json:"max_prowjob_age,omitempty"`
+	ResyncPeriod *metav1.Duration `json:"resync_period,omitempty"`
 	// MaxProwJobAge is how old a ProwJob can be before it is garbage-collected.
 	// Defaults to one week.
-	MaxProwJobAge time.Duration `json:"-"`
-	// MaxPodAgeString compiles into MaxPodAge at load time.
-	MaxPodAgeString string `json:"max_pod_age,omitempty"`
+	MaxProwJobAge *metav1.Duration `json:"max_prowjob_age,omitempty"`
 	// MaxPodAge is how old a Pod can be before it is garbage-collected.
 	// Defaults to one day.
-	MaxPodAge time.Duration `json:"-"`
+	MaxPodAge *metav1.Duration `json:"max_pod_age,omitempty"`
+}
+
+// LensConfig names a specific lens, and optionally provides some configuration for it.
+type LensConfig struct {
+	// Name is the name of the lens.
+	Name string `json:"name"`
+	// Config is some lens-specific configuration. Interpreting it is the responsibility of the
+	// lens in question.
+	Config json.RawMessage `json:"config"`
+}
+
+// LensFileConfig is a single entry under Lenses, describing how to configure a lens
+// to read a given set of files.
+type LensFileConfig struct {
+	// RequiredFiles is a list of regexes of file paths that must all be present for a lens to appear.
+	// The list entries are ANDed together, i.e. all of them are required. You can achieve an OR
+	// by using a pipe in a regex.
+	RequiredFiles []string `json:"required_files"`
+	// OptionalFiles is a list of regexes of file paths that will be provided to the lens if they are
+	// present, but will not preclude the lens being rendered by their absence.
+	// The list entries are ORed together, so if only one of them is present it will be provided to
+	// the lens even if the others are not.
+	OptionalFiles []string `json:"optional_files,omitempty"`
+	// Lens is the lens to use, alongside any lens-specific configuration.
+	Lens LensConfig `json:"lens"`
 }
 
 // Spyglass holds config for Spyglass
 type Spyglass struct {
-	// Viewers is a map of Regexp strings to viewer names that defines which sets
-	// of artifacts need to be consumed by which viewers. The keys are compiled
-	// and stored in RegexCache at load time.
+	// Lenses is a list of lens configurations.
+	Lenses []LensFileConfig `json:"lenses,omitempty"`
+	// Viewers is deprecated, prefer Lenses instead.
+	// Viewers was a map of Regexp strings to viewer names that defines which sets
+	// of artifacts need to be consumed by which viewers. It is copied in to Lenses at load time.
 	Viewers map[string][]string `json:"viewers,omitempty"`
-	// RegexCache is a map of viewer regexp strings to their compiled equivalents.
+	// RegexCache is a map of lens regexp strings to their compiled equivalents.
 	RegexCache map[string]*regexp.Regexp `json:"-"`
 	// SizeLimit is the max size artifact in bytes that Spyglass will attempt to
 	// read in entirety. This will only affect viewers attempting to use
@@ -310,10 +382,8 @@ type Spyglass struct {
 type Deck struct {
 	// Spyglass specifies which viewers will be used for which artifacts when viewing a job in Deck
 	Spyglass Spyglass `json:"spyglass,omitempty"`
-	// TideUpdatePeriodString compiles into TideUpdatePeriod at load time.
-	TideUpdatePeriodString string `json:"tide_update_period,omitempty"`
 	// TideUpdatePeriod specifies how often Deck will fetch status from Tide. Defaults to 10s.
-	TideUpdatePeriod time.Duration `json:"-"`
+	TideUpdatePeriod *metav1.Duration `json:"tide_update_period,omitempty"`
 	// HiddenRepos is a list of orgs and/or repos that should not be displayed by Deck.
 	HiddenRepos []string `json:"hidden_repos,omitempty"`
 	// ExternalAgentLogs ensures external agents can expose
@@ -321,6 +391,12 @@ type Deck struct {
 	ExternalAgentLogs []ExternalAgentLog `json:"external_agent_logs,omitempty"`
 	// Branding of the frontend
 	Branding *Branding `json:"branding,omitempty"`
+	// GoogleAnalytics, if specified, include a Google Analytics tracking code on each page.
+	GoogleAnalytics string `json:"google_analytics,omitempty"`
+	// RerunAuthConfig specifies who is able to trigger job reruns if that feature is enabled.
+	// The permissions here apply to all jobs. GitHub teams are not yet supported
+	// for the global Deck config.
+	RerunAuthConfig prowapi.RerunAuthConfig `json:"rerun_auth_config,omitempty"`
 }
 
 // ExternalAgentLog ensures an external agent like Jenkins can expose
@@ -370,6 +446,37 @@ type GitHubOptions struct {
 	LinkURL *url.URL
 }
 
+// SlackReporter represents the config for the Slack reporter. The channel can be overridden
+// on the job via the .reporter_config.slack.channel property
+type SlackReporter struct {
+	JobTypesToReport  []prowapi.ProwJobType  `json:"job_types_to_report"`
+	JobStatesToReport []prowapi.ProwJobState `json:"job_states_to_report"`
+	Channel           string                 `json:"channel"`
+	ReportTemplate    string                 `json:"report_template"`
+}
+
+func (cfg *SlackReporter) DefaultAndValidate() error {
+	// Default ReportTemplate
+	if cfg.ReportTemplate == "" {
+		cfg.ReportTemplate = `Job {{.Spec.Job}} of type {{.Spec.Type}} ended with state {{.Status.State}}. <{{.Status.URL}}|View logs>`
+	}
+
+	if cfg.Channel == "" {
+		return errors.New("channel must be set")
+	}
+
+	// Validate ReportTemplate
+	tmpl, err := template.New("").Parse(cfg.ReportTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to parse template: %v", err)
+	}
+	if err := tmpl.Execute(&bytes.Buffer{}, &prowapi.ProwJob{}); err != nil {
+		return fmt.Errorf("failed to execute report_template: %v", err)
+	}
+
+	return nil
+}
+
 // Load loads and parses the config at path.
 func Load(prowConfig, jobConfig string) (c *Config, err error) {
 	// we never want config loading to take down the prow components
@@ -394,52 +501,27 @@ func Load(prowConfig, jobConfig string) (c *Config, err error) {
 	return c, nil
 }
 
-// loadConfig loads one or multiple config files and returns a config object.
-func loadConfig(prowConfig, jobConfig string) (*Config, error) {
-	stat, err := os.Stat(prowConfig)
+// ReadJobConfig reads the JobConfig yaml, but does not expand or validate it.
+func ReadJobConfig(jobConfig string) (JobConfig, error) {
+	stat, err := os.Stat(jobConfig)
 	if err != nil {
-		return nil, err
-	}
-
-	if stat.IsDir() {
-		return nil, fmt.Errorf("prowConfig cannot be a dir - %s", prowConfig)
-	}
-
-	var nc Config
-	if err := yamlToConfig(prowConfig, &nc); err != nil {
-		return nil, err
-	}
-	if err := parseProwConfig(&nc); err != nil {
-		return nil, err
-	}
-
-	// TODO(krzyzacy): temporary allow empty jobconfig
-	//                 also temporary allow job config in prow config
-	if jobConfig == "" {
-		return &nc, nil
-	}
-
-	stat, err = os.Stat(jobConfig)
-	if err != nil {
-		return nil, err
+		return JobConfig{}, err
 	}
 
 	if !stat.IsDir() {
 		// still support a single file
 		var jc JobConfig
 		if err := yamlToConfig(jobConfig, &jc); err != nil {
-			return nil, err
+			return JobConfig{}, err
 		}
-		if err := nc.mergeJobConfig(jc); err != nil {
-			return nil, err
-		}
-		return &nc, nil
+		return jc, nil
 	}
 
 	// we need to ensure all config files have unique basenames,
 	// since updateconfig plugin will use basename as a key in the configmap
 	uniqueBasenames := sets.String{}
 
+	jc := JobConfig{}
 	err = filepath.Walk(jobConfig, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			logrus.WithError(err).Errorf("walking path %q.", path)
@@ -474,10 +556,47 @@ func loadConfig(prowConfig, jobConfig string) (*Config, error) {
 		if err := yamlToConfig(path, &subConfig); err != nil {
 			return err
 		}
-		return nc.mergeJobConfig(subConfig)
+		jc, err = mergeJobConfigs(jc, subConfig)
+		return err
 	})
 
 	if err != nil {
+		return JobConfig{}, err
+	}
+
+	return jc, nil
+}
+
+// loadConfig loads one or multiple config files and returns a config object.
+func loadConfig(prowConfig, jobConfig string) (*Config, error) {
+	stat, err := os.Stat(prowConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	if stat.IsDir() {
+		return nil, fmt.Errorf("prowConfig cannot be a dir - %s", prowConfig)
+	}
+
+	var nc Config
+	if err := yamlToConfig(prowConfig, &nc); err != nil {
+		return nil, err
+	}
+	if err := parseProwConfig(&nc); err != nil {
+		return nil, err
+	}
+
+	// TODO(krzyzacy): temporary allow empty jobconfig
+	//                 also temporary allow job config in prow config
+	if jobConfig == "" {
+		return &nc, nil
+	}
+
+	jc, err := ReadJobConfig(jobConfig)
+	if err != nil {
+		return nil, err
+	}
+	if err := nc.mergeJobConfig(jc); err != nil {
 		return nil, err
 	}
 
@@ -549,16 +668,34 @@ func ReadFileMaybeGZIP(path string) ([]byte, error) {
 	return ioutil.ReadAll(gzipReader)
 }
 
-// mergeConfig merges two JobConfig together
+func (c *Config) mergeJobConfig(jc JobConfig) error {
+	m, err := mergeJobConfigs(JobConfig{
+		Presets:     c.Presets,
+		Presubmits:  c.Presubmits,
+		Periodics:   c.Periodics,
+		Postsubmits: c.Postsubmits,
+	}, jc)
+	if err != nil {
+		return err
+	}
+	c.Presets = m.Presets
+	c.Presubmits = m.Presubmits
+	c.Periodics = m.Periodics
+	c.Postsubmits = m.Postsubmits
+	return nil
+}
+
+// mergeJobConfigs merges two JobConfig together
 // It will try to merge:
 //	- Presubmits
 //	- Postsubmits
 // 	- Periodics
 //	- PodPresets
-func (c *Config) mergeJobConfig(jc JobConfig) error {
+func mergeJobConfigs(a, b JobConfig) (JobConfig, error) {
 	// Merge everything
 	// *** Presets ***
-	c.Presets = append(c.Presets, jc.Presets...)
+	c := JobConfig{}
+	c.Presets = append(a.Presets, b.Presets...)
 
 	// validate no duplicated preset key-value pairs
 	validLabels := map[string]bool{}
@@ -566,32 +703,33 @@ func (c *Config) mergeJobConfig(jc JobConfig) error {
 		for label, val := range preset.Labels {
 			pair := label + ":" + val
 			if _, ok := validLabels[pair]; ok {
-				return fmt.Errorf("duplicated preset 'label:value' pair : %s", pair)
+				return JobConfig{}, fmt.Errorf("duplicated preset 'label:value' pair : %s", pair)
 			}
 			validLabels[pair] = true
 		}
 	}
 
 	// *** Periodics ***
-	c.Periodics = append(c.Periodics, jc.Periodics...)
+	c.Periodics = append(a.Periodics, b.Periodics...)
 
 	// *** Presubmits ***
-	if c.Presubmits == nil {
-		c.Presubmits = make(map[string][]Presubmit)
+	c.Presubmits = make(map[string][]Presubmit)
+	for repo, jobs := range a.Presubmits {
+		c.Presubmits[repo] = jobs
 	}
-	for repo, jobs := range jc.Presubmits {
+	for repo, jobs := range b.Presubmits {
 		c.Presubmits[repo] = append(c.Presubmits[repo], jobs...)
 	}
 
 	// *** Postsubmits ***
-	if c.Postsubmits == nil {
-		c.Postsubmits = make(map[string][]Postsubmit)
+	c.Postsubmits = make(map[string][]Postsubmit)
+	for repo, jobs := range a.Postsubmits {
+		c.Postsubmits[repo] = jobs
 	}
-	for repo, jobs := range jc.Postsubmits {
+	for repo, jobs := range b.Postsubmits {
 		c.Postsubmits[repo] = append(c.Postsubmits[repo], jobs...)
 	}
-
-	return nil
+	return c, nil
 }
 
 func setPresubmitDecorationDefaults(c *Config, ps *Presubmit) {
@@ -692,6 +830,12 @@ func (c *Config) validateComponentConfig() error {
 			return fmt.Errorf(`Invalid value for Planks job_url_prefix_config["%s"]: %v`, k, err)
 		}
 	}
+
+	if c.SlackReporter != nil {
+		if err := c.SlackReporter.DefaultAndValidate(); err != nil {
+			return fmt.Errorf("failed to validate slackreporter config: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -711,11 +855,17 @@ func validateJobBase(v JobBase, jobType prowapi.ProwJobType, podNamespace string
 	if err := validatePodSpec(jobType, v.Spec); err != nil {
 		return err
 	}
+	if err := ValidatePipelineRunSpec(jobType, v.ExtraRefs, v.PipelineRunSpec); err != nil {
+		return err
+	}
 	if err := validateLabels(v.Labels); err != nil {
 		return err
 	}
 	if v.Spec == nil || len(v.Spec.Containers) == 0 {
 		return nil // knative-build and jenkins jobs have no spec
+	}
+	if v.RerunAuthConfig != nil && v.RerunAuthConfig.AllowAnyone && (len(v.RerunAuthConfig.GitHubUsers) > 0 || len(v.RerunAuthConfig.GitHubTeamIDs) > 0 || len(v.RerunAuthConfig.GitHubTeamSlugs) > 0) {
+		return errors.New("allow anyone is set to true and permitted users or groups are specified")
 	}
 	return validateDecoration(v.Spec.Containers[0], v.DecorationConfig)
 }
@@ -807,29 +957,35 @@ func (c *Config) validateJobConfig() error {
 	return nil
 }
 
+// DefaultConfigPath will be used if a --config-path is unset
+const DefaultConfigPath = "/etc/config/config.yaml"
+
+// ConfigPath returns the value for the component's configPath if provided
+// explicitly or default otherwise.
+func ConfigPath(value string) string {
+
+	if value != "" {
+		return value
+	}
+	logrus.Warningf("defaulting to %s until 15 July 2019, please migrate", DefaultConfigPath)
+	return DefaultConfigPath
+}
+
 func parseProwConfig(c *Config) error {
 	if err := ValidateController(&c.Plank.Controller); err != nil {
 		return fmt.Errorf("validating plank config: %v", err)
 	}
 
-	if c.Plank.PodPendingTimeoutString == "" {
-		c.Plank.PodPendingTimeout = 24 * time.Hour
-	} else {
-		podPendingTimeout, err := time.ParseDuration(c.Plank.PodPendingTimeoutString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for plank.pod_pending_timeout: %v", err)
-		}
-		c.Plank.PodPendingTimeout = podPendingTimeout
+	if c.Plank.PodPendingTimeout == nil {
+		c.Plank.PodPendingTimeout = &metav1.Duration{Duration: 24 * time.Hour}
 	}
 
-	if c.Gerrit.TickIntervalString == "" {
-		c.Gerrit.TickInterval = time.Minute
-	} else {
-		tickInterval, err := time.ParseDuration(c.Gerrit.TickIntervalString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for c.gerrit.tick_interval: %v", err)
-		}
-		c.Gerrit.TickInterval = tickInterval
+	if c.Plank.PodRunningTimeout == nil {
+		c.Plank.PodRunningTimeout = &metav1.Duration{Duration: 48 * time.Hour}
+	}
+
+	if c.Gerrit.TickInterval == nil {
+		c.Gerrit.TickInterval = &metav1.Duration{Duration: time.Minute}
 	}
 
 	if c.Gerrit.RateLimit == 0 {
@@ -837,8 +993,7 @@ func parseProwConfig(c *Config) error {
 	}
 
 	if len(c.GitHubReporter.JobTypesToReport) == 0 {
-		// TODO(krzyzacy): The default will be changed to presubmit + postsubmit by April.
-		c.GitHubReporter.JobTypesToReport = append(c.GitHubReporter.JobTypesToReport, prowapi.PresubmitJob)
+		c.GitHubReporter.JobTypesToReport = append(c.GitHubReporter.JobTypesToReport, prowapi.PresubmitJob, prowapi.PostsubmitJob)
 	}
 
 	// validate entries are valid job types
@@ -882,14 +1037,8 @@ func parseProwConfig(c *Config) error {
 		c.Deck.ExternalAgentLogs[i].Selector = s
 	}
 
-	if c.Deck.TideUpdatePeriodString == "" {
-		c.Deck.TideUpdatePeriod = time.Second * 10
-	} else {
-		period, err := time.ParseDuration(c.Deck.TideUpdatePeriodString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for deck.tide_update_period: %v", err)
-		}
-		c.Deck.TideUpdatePeriod = period
+	if c.Deck.TideUpdatePeriod == nil {
+		c.Deck.TideUpdatePeriod = &metav1.Duration{Duration: time.Second * 10}
 	}
 
 	if c.Deck.Spyglass.SizeLimit == 0 {
@@ -898,13 +1047,43 @@ func parseProwConfig(c *Config) error {
 		return fmt.Errorf("invalid value for deck.spyglass.size_limit, must be >=0")
 	}
 
-	c.Deck.Spyglass.RegexCache = make(map[string]*regexp.Regexp)
-	for k := range c.Deck.Spyglass.Viewers {
-		r, err := regexp.Compile(k)
-		if err != nil {
-			return fmt.Errorf("cannot compile regexp %s, err: %v", k, err)
+	// If a whitelist is specified, the user probably does not intend for anyone to be able
+	// to rerun any job.
+	if c.Deck.RerunAuthConfig.AllowAnyone && (len(c.Deck.RerunAuthConfig.GitHubUsers) > 0 || len(c.Deck.RerunAuthConfig.GitHubTeamIDs) > 0 || len(c.Deck.RerunAuthConfig.GitHubTeamSlugs) > 0) {
+		return fmt.Errorf("allow_anyone is set to true and authorized users or teams are specified.")
+	}
+
+	// Migrate the old `viewers` format to the new `lenses` format.
+	var oldLenses []LensFileConfig
+	for regex, viewers := range c.Deck.Spyglass.Viewers {
+		for _, viewer := range viewers {
+			lfc := LensFileConfig{
+				RequiredFiles: []string{regex},
+				Lens: LensConfig{
+					Name: viewer,
+				},
+			}
+			oldLenses = append(oldLenses, lfc)
 		}
-		c.Deck.Spyglass.RegexCache[k] = r
+	}
+	// Ensure the ordering is stable, because these are referenced by index elsewhere.
+	sort.Slice(oldLenses, func(i, j int) bool { return oldLenses[i].Lens.Name < oldLenses[j].Lens.Name })
+	c.Deck.Spyglass.Lenses = append(c.Deck.Spyglass.Lenses, oldLenses...)
+
+	// Parse and cache all our regexes upfront
+	c.Deck.Spyglass.RegexCache = make(map[string]*regexp.Regexp)
+	for _, lens := range c.Deck.Spyglass.Lenses {
+		toCompile := append(lens.OptionalFiles, lens.RequiredFiles...)
+		for _, v := range toCompile {
+			if _, ok := c.Deck.Spyglass.RegexCache[v]; ok {
+				continue
+			}
+			r, err := regexp.Compile(v)
+			if err != nil {
+				return fmt.Errorf("cannot compile regexp %q, err: %v", v, err)
+			}
+			c.Deck.Spyglass.RegexCache[v] = r
+		}
 	}
 
 	// Map old viewer names to the new ones for backwards compatibility.
@@ -923,63 +1102,28 @@ func parseProwConfig(c *Config) error {
 		}
 	}
 
-	if c.PushGateway.IntervalString == "" {
-		c.PushGateway.Interval = time.Minute
-	} else {
-		interval, err := time.ParseDuration(c.PushGateway.IntervalString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for push_gateway.interval: %v", err)
-		}
-		c.PushGateway.Interval = interval
+	if c.PushGateway.Interval == nil {
+		c.PushGateway.Interval = &metav1.Duration{Duration: time.Minute}
 	}
 
-	if c.Sinker.ResyncPeriodString == "" {
-		c.Sinker.ResyncPeriod = time.Hour
-	} else {
-		resyncPeriod, err := time.ParseDuration(c.Sinker.ResyncPeriodString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for sinker.resync_period: %v", err)
-		}
-		c.Sinker.ResyncPeriod = resyncPeriod
+	if c.Sinker.ResyncPeriod == nil {
+		c.Sinker.ResyncPeriod = &metav1.Duration{Duration: time.Hour}
 	}
 
-	if c.Sinker.MaxProwJobAgeString == "" {
-		c.Sinker.MaxProwJobAge = 7 * 24 * time.Hour
-	} else {
-		maxProwJobAge, err := time.ParseDuration(c.Sinker.MaxProwJobAgeString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for max_prowjob_age: %v", err)
-		}
-		c.Sinker.MaxProwJobAge = maxProwJobAge
+	if c.Sinker.MaxProwJobAge == nil {
+		c.Sinker.MaxProwJobAge = &metav1.Duration{Duration: 7 * 24 * time.Hour}
 	}
 
-	if c.Sinker.MaxPodAgeString == "" {
-		c.Sinker.MaxPodAge = 24 * time.Hour
-	} else {
-		maxPodAge, err := time.ParseDuration(c.Sinker.MaxPodAgeString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for max_pod_age: %v", err)
-		}
-		c.Sinker.MaxPodAge = maxPodAge
+	if c.Sinker.MaxPodAge == nil {
+		c.Sinker.MaxPodAge = &metav1.Duration{Duration: 24 * time.Hour}
 	}
 
-	if c.Tide.SyncPeriodString == "" {
-		c.Tide.SyncPeriod = time.Minute
-	} else {
-		period, err := time.ParseDuration(c.Tide.SyncPeriodString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for tide.sync_period: %v", err)
-		}
-		c.Tide.SyncPeriod = period
+	if c.Tide.SyncPeriod == nil {
+		c.Tide.SyncPeriod = &metav1.Duration{Duration: time.Minute}
 	}
-	if c.Tide.StatusUpdatePeriodString == "" {
+
+	if c.Tide.StatusUpdatePeriod == nil {
 		c.Tide.StatusUpdatePeriod = c.Tide.SyncPeriod
-	} else {
-		period, err := time.ParseDuration(c.Tide.StatusUpdatePeriodString)
-		if err != nil {
-			return fmt.Errorf("cannot parse duration for tide.status_update_period: %v", err)
-		}
-		c.Tide.StatusUpdatePeriod = period
 	}
 
 	if c.Tide.MaxGoroutines == 0 {
@@ -995,6 +1139,30 @@ func parseProwConfig(c *Config) error {
 			method != github.MergeSquash {
 			return fmt.Errorf("merge type %q for %s is not a valid type", method, name)
 		}
+	}
+
+	for name, templates := range c.Tide.MergeTemplate {
+		if templates.TitleTemplate != "" {
+			titleTemplate, err := template.New("CommitTitle").Parse(templates.TitleTemplate)
+
+			if err != nil {
+				return fmt.Errorf("parsing template for commit title: %v", err)
+			}
+
+			templates.Title = titleTemplate
+		}
+
+		if templates.BodyTemplate != "" {
+			bodyTemplate, err := template.New("CommitBody").Parse(templates.BodyTemplate)
+
+			if err != nil {
+				return fmt.Errorf("parsing template for commit body: %v", err)
+			}
+
+			templates.Body = bodyTemplate
+		}
+
+		c.Tide.MergeTemplate[name] = templates
 	}
 
 	for i, tq := range c.Tide.Queries {
@@ -1042,6 +1210,11 @@ func parseProwConfig(c *Config) error {
 		return err
 	}
 	logrus.SetLevel(lvl)
+
+	// Avoid using a job timeout of infinity by setting the default value to 24 hours
+	if c.DefaultJobTimeout == nil {
+		c.DefaultJobTimeout = &metav1.Duration{Duration: DefaultJobTimeout}
+	}
 
 	return nil
 }
@@ -1093,11 +1266,13 @@ func validateAgent(v JobBase, podNamespace string) error {
 	k := string(prowapi.KubernetesAgent)
 	b := string(prowapi.KnativeBuildAgent)
 	j := string(prowapi.JenkinsAgent)
-	agents := sets.NewString(k, b, j)
+	p := string(prowapi.TektonAgent)
+	agents := sets.NewString(k, b, j, p)
 	agent := v.Agent
 	switch {
 	case !agents.Has(agent):
-		return fmt.Errorf("agent must be one of %s (found %q)", strings.Join(agents.List(), ", "), agent)
+		logrus.Warningf("agent %s is unknown and cannot be validated: use at your own risk", agent)
+		return nil
 	case v.Spec != nil && agent != k:
 		return fmt.Errorf("job specs require agent: %s (found %q)", k, agent)
 	case agent == k && v.Spec == nil:
@@ -1106,6 +1281,10 @@ func validateAgent(v JobBase, podNamespace string) error {
 		return fmt.Errorf("job build_specs require agent: %s (found %q)", b, agent)
 	case agent == b && v.BuildSpec == nil:
 		return errors.New("knative-build jobs require a build_spec")
+	case v.PipelineRunSpec != nil && agent != p:
+		return fmt.Errorf("job pipeline_run_spec require agent: %s (found %q)", p, agent)
+	case agent == p && v.PipelineRunSpec == nil:
+		return fmt.Errorf("agent: %s jobs require a pipeline_run_spec", p)
 	case v.DecorationConfig != nil && agent != k && agent != b:
 		// TODO(fejta): only source decoration supported...
 		return fmt.Errorf("decoration requires agent: %s or %s (found %q)", k, b, agent)
@@ -1113,9 +1292,9 @@ func validateAgent(v JobBase, podNamespace string) error {
 		return fmt.Errorf("error_on_eviction only applies to agent: %s (found %q)", k, agent)
 	case v.Namespace == nil || *v.Namespace == "":
 		return fmt.Errorf("failed to default namespace")
-	case *v.Namespace != podNamespace && agent != b:
+	case *v.Namespace != podNamespace && agent != b && agent != p:
 		// TODO(fejta): update plank to allow this (depends on client change)
-		return fmt.Errorf("namespace customization requires agent: %s (found %q)", b, agent)
+		return fmt.Errorf("namespace customization requires agent: %s or %s (found %q)", b, p, agent)
 	}
 	return nil
 }
@@ -1151,6 +1330,52 @@ func resolvePresets(name string, labels map[string]string, spec *v1.PodSpec, bui
 		}
 	}
 
+	return nil
+}
+
+var ReProwExtraRef = regexp.MustCompile(`PROW_EXTRA_GIT_REF_(\d+)`)
+
+func ValidatePipelineRunSpec(jobType prowapi.ProwJobType, extraRefs []prowapi.Refs, spec *pipelinev1alpha1.PipelineRunSpec) error {
+	if spec == nil {
+		return nil
+	}
+	// Validate that that the refs match what is requested by the job.
+	// The implicit git ref is optional to use, but any extra refs specified must
+	// be used or removed. (Specifying an unused extra ref must always be
+	// unintentional so we want to warn the user.)
+	extraIndexes := sets.NewInt()
+	for _, resource := range spec.Resources {
+		// Validate that periodic jobs don't request an implicit git ref
+		if jobType == prowapi.PeriodicJob && resource.ResourceRef.Name == ProwImplicitGitResource {
+			return fmt.Errorf("periodic jobs do not have an implicit git ref to replace %s", ProwImplicitGitResource)
+		}
+
+		match := ReProwExtraRef.FindStringSubmatch(resource.ResourceRef.Name)
+		if len(match) != 2 {
+			continue
+		}
+		if len(match[1]) > 1 && match[1][0] == '0' {
+			return fmt.Errorf("resource %q: leading zeros are not allowed in PROW_EXTRA_GIT_REF_* indexes", resource.Name)
+		}
+		i, _ := strconv.Atoi(match[1]) // This can't error based on the regexp.
+		extraIndexes.Insert(i)
+	}
+	for i := range extraRefs {
+		if !extraIndexes.Has(i) {
+			return fmt.Errorf("extra_refs[%d] is not used; some resource must reference PROW_EXTRA_GIT_REF_%d", i, i)
+		}
+	}
+	if len(extraRefs) != extraIndexes.Len() {
+		strs := make([]string, 0, extraIndexes.Len())
+		for i := range extraIndexes {
+			strs = append(strs, strconv.Itoa(i))
+		}
+		return fmt.Errorf(
+			"%d extra_refs are specified, but the following PROW_EXTRA_GIT_REF_* indexes are used: %s.",
+			len(extraRefs),
+			strings.Join(strs, ", "),
+		)
+	}
 	return nil
 }
 
@@ -1207,6 +1432,10 @@ func validateTriggering(job Presubmit) error {
 
 	if !job.SkipReport && job.Context == "" {
 		return fmt.Errorf("job %s is set to report but has no context configured", job.Name)
+	}
+
+	if (job.Trigger != "" && job.RerunCommand == "") || (job.Trigger == "" && job.RerunCommand != "") {
+		return fmt.Errorf("Either both of job.Trigger and job.RerunCommand must be set, wasnt the case for job %q", job.Name)
 	}
 
 	return nil

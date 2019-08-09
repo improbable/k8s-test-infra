@@ -18,13 +18,14 @@ package plank
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"k8s.io/api/core/v1"
 	coreapi "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
@@ -34,6 +35,11 @@ import (
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/pod-utils/decorate"
+)
+
+// PodStatus constants
+const (
+	Evicted = "Evicted"
 )
 
 type kubeClient interface {
@@ -73,11 +79,15 @@ type Controller struct {
 	// selector that will be applied on prowjobs and pods.
 	selector string
 
+	// If both this and pjLock are acquired, this must be acquired first
 	lock sync.RWMutex
+
 	// pendingJobs is a short-lived cache that helps in limiting
 	// the maximum concurrency of jobs.
 	pendingJobs map[string]int
 
+	// If `lock` is acquired as well, `lock` must be acquired before locking
+	// pjLock
 	pjLock sync.RWMutex
 	// shared across the controller and a goroutine that gathers metrics.
 	pjs []prowapi.ProwJob
@@ -135,6 +145,29 @@ func (c *Controller) canExecuteConcurrently(pj *prowapi.ProwJob) bool {
 		c.log.WithFields(pjutil.ProwJobFields(pj)).Debugf("Not starting another instance of %s, already %d running.", pj.Spec.Job, numPending)
 		return false
 	}
+
+	var olderMatchingPJs int
+	c.pjLock.RLock()
+	for _, foundPJ := range c.pjs {
+		if foundPJ.Status.State != prowapi.TriggeredState {
+			continue
+		}
+		if foundPJ.Spec.Job != pj.Spec.Job {
+			continue
+		}
+		if foundPJ.CreationTimestamp.Before(&pj.CreationTimestamp) {
+			olderMatchingPJs++
+		}
+	}
+	c.pjLock.RUnlock()
+
+	if numPending+olderMatchingPJs >= pj.Spec.MaxConcurrency {
+		c.log.WithFields(pjutil.ProwJobFields(pj)).
+			Debugf("Not starting another instance of %s, already %d running and %d older instances waiting, together they equal or exceed the total limit of %d",
+				pj.Spec.Job, numPending, olderMatchingPJs, pj.Spec.MaxConcurrency)
+		return false
+	}
+
 	c.pendingJobs[pj.Spec.Job]++
 	return true
 }
@@ -176,7 +209,7 @@ func (c *Controller) Sync() error {
 		selector = strings.Join([]string{c.selector, selector}, ",")
 	}
 
-	pm := map[string]kube.Pod{}
+	pm := map[string]v1.Pod{}
 	for alias, client := range c.pkcs {
 		pods, err := client.ListPods(selector)
 		if err != nil {
@@ -195,6 +228,10 @@ func (c *Controller) Sync() error {
 		}
 	}
 	pjs = k8sJobs
+	// Sort jobs so jobs started earlier get better chance picked up earlier
+	sort.Slice(pjs, func(i, j int) bool {
+		return pjs[i].CreationTimestamp.Before(&pjs[j].CreationTimestamp)
+	})
 
 	var syncErrs []error
 	if err := c.terminateDupes(pjs, pm); err != nil {
@@ -262,48 +299,21 @@ func (c *Controller) SyncMetrics() {
 // in-place when it aborts.
 // TODO: Dry this out - need to ensure we can abstract children cancellation first.
 func (c *Controller) terminateDupes(pjs []prowapi.ProwJob, pm map[string]coreapi.Pod) error {
-	// "job org/repo#number" -> newest job
-	dupes := make(map[string]int)
-	for i, pj := range pjs {
-		if pj.Complete() || pj.Spec.Type != prowapi.PresubmitJob {
-			continue
-		}
-		n := fmt.Sprintf("%s %s/%s#%d", pj.Spec.Job, pj.Spec.Refs.Org, pj.Spec.Refs.Repo, pj.Spec.Refs.Pulls[0].Number)
-		prev, ok := dupes[n]
-		if !ok {
-			dupes[n] = i
-			continue
-		}
-		cancelIndex := i
-		if (&pjs[prev].Status.StartTime).Before(&pj.Status.StartTime) {
-			cancelIndex = prev
-			dupes[n] = i
-		}
-		toCancel := pjs[cancelIndex]
+	log := c.log.WithField("aborter", "pod")
+	return pjutil.TerminateOlderJobs(c.kc, log, pjs, func(toCancel prowapi.ProwJob) error {
 		// Allow aborting presubmit jobs for commits that have been superseded by
 		// newer commits in GitHub pull requests.
 		if c.config().Plank.AllowCancellations {
 			if pod, exists := pm[toCancel.ObjectMeta.Name]; exists {
 				if client, ok := c.pkcs[toCancel.ClusterAlias()]; !ok {
-					c.log.WithFields(pjutil.ProwJobFields(&toCancel)).Errorf("Unknown cluster alias %q.", toCancel.ClusterAlias())
+					return fmt.Errorf("unknown cluster alias %q", toCancel.ClusterAlias())
 				} else if err := client.DeletePod(pod.ObjectMeta.Name); err != nil {
-					c.log.WithError(err).WithFields(pjutil.ProwJobFields(&toCancel)).Warn("Cannot delete pod")
+					return fmt.Errorf("deleting pod: %v", err)
 				}
 			}
 		}
-		toCancel.SetComplete()
-		prevState := toCancel.Status.State
-		toCancel.Status.State = prowapi.AbortedState
-		c.log.WithFields(pjutil.ProwJobFields(&toCancel)).
-			WithField("from", prevState).
-			WithField("to", toCancel.Status.State).Info("Transitioning states.")
-		npj, err := c.kc.ReplaceProwJob(toCancel.ObjectMeta.Name, toCancel)
-		if err != nil {
-			return err
-		}
-		pjs[cancelIndex] = npj
-	}
-	return nil
+		return nil
+	})
 }
 
 // TODO: Dry this out
@@ -349,7 +359,7 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, pm map[string]coreapi.Po
 		if err != nil {
 			_, isUnprocessable := err.(kube.UnprocessableEntityError)
 			if !isUnprocessable {
-				return fmt.Errorf("error starting pod: %v", err)
+				return fmt.Errorf("error starting pod %s: %v", pod.Name, err)
 			}
 			pj.Status.State = prowapi.ErrorState
 			pj.SetComplete()
@@ -369,7 +379,7 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, pm map[string]coreapi.Po
 			c.log.WithFields(pjutil.ProwJobFields(&pj)).Info("Pod is in unknown state, deleting & restarting pod")
 			client, ok := c.pkcs[pj.ClusterAlias()]
 			if !ok {
-				return fmt.Errorf("unknown cluster alias %q", pj.ClusterAlias())
+				return fmt.Errorf("unknown pod %s: unknown cluster alias %q", pod.Name, pj.ClusterAlias())
 			}
 			return client.DeletePod(pj.ObjectMeta.Name)
 
@@ -380,7 +390,7 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, pm map[string]coreapi.Po
 			pj.Status.Description = "Job succeeded."
 
 		case coreapi.PodFailed:
-			if pod.Status.Reason == kube.Evicted {
+			if pod.Status.Reason == Evicted {
 				// Pod was evicted.
 				if pj.Spec.ErrorOnEviction {
 					// ErrorOnEviction is enabled, complete the PJ and mark it as errored.
@@ -394,7 +404,7 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, pm map[string]coreapi.Po
 				c.incrementNumPendingJobs(pj.Spec.Job)
 				client, ok := c.pkcs[pj.ClusterAlias()]
 				if !ok {
-					return fmt.Errorf("unknown cluster alias %q", pj.ClusterAlias())
+					return fmt.Errorf("evicted pod %s: unknown cluster alias %q", pod.Name, pj.ClusterAlias())
 				}
 				return client.DeletePod(pj.ObjectMeta.Name)
 			}
@@ -404,7 +414,7 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, pm map[string]coreapi.Po
 			pj.Status.Description = "Job failed."
 
 		case coreapi.PodPending:
-			maxPodPending := c.config().Plank.PodPendingTimeout
+			maxPodPending := c.config().Plank.PodPendingTimeout.Duration
 			if pod.Status.StartTime.IsZero() || time.Since(pod.Status.StartTime.Time) < maxPodPending {
 				// Pod is running. Do nothing.
 				c.incrementNumPendingJobs(pj.Spec.Job)
@@ -418,15 +428,36 @@ func (c *Controller) syncPendingJob(pj prowapi.ProwJob, pm map[string]coreapi.Po
 			pj.Status.Description = "Pod pending timeout."
 			client, ok := c.pkcs[pj.ClusterAlias()]
 			if !ok {
-				return fmt.Errorf("unknown cluster alias %q", pj.ClusterAlias())
+				return fmt.Errorf("pending pod %s: unknown cluster alias %q", pod.Name, pj.ClusterAlias())
 			}
 			if err := client.DeletePod(pod.ObjectMeta.Name); err != nil {
 				return fmt.Errorf("failed to delete pod %s that was in pending timeout: %v", pod.Name, err)
 			}
 			c.log.WithFields(pjutil.ProwJobFields(&pj)).Info("Deleted stale pending pod.")
 
+		case coreapi.PodRunning:
+			maxPodRunning := c.config().Plank.PodRunningTimeout.Duration
+			if pod.Status.StartTime.IsZero() || time.Since(pod.Status.StartTime.Time) < maxPodRunning {
+				// Pod is still running. Do nothing.
+				c.incrementNumPendingJobs(pj.Spec.Job)
+				return nil
+			}
+
+			// Pod is stuck in running state longer than maxPodRunning
+			// abort the job, and talk to GitHub
+			pj.SetComplete()
+			pj.Status.State = prowapi.AbortedState
+			pj.Status.Description = "Pod running timeout."
+			client, ok := c.pkcs[pj.ClusterAlias()]
+			if !ok {
+				return fmt.Errorf("running pod %s: unknown cluster alias %q", pod.Name, pj.ClusterAlias())
+			}
+			if err := client.DeletePod(pod.ObjectMeta.Name); err != nil {
+				return fmt.Errorf("failed to delete pod %s that was in running timeout: %v", pod.Name, err)
+			}
+			c.log.WithFields(pjutil.ProwJobFields(&pj)).Info("Deleted stale running pod.")
 		default:
-			// Pod is running. Do nothing.
+			// other states, ignore
 			c.incrementNumPendingJobs(pj.Spec.Job)
 			return nil
 		}

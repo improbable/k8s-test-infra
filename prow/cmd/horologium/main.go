@@ -44,12 +44,9 @@ type options struct {
 	dryRun     flagutil.Bool
 }
 
-// TODO(fejta): require setting this explicitly
-const defaultConfigPath = "/etc/config/config.yaml"
-
 func gatherOptions(fs *flag.FlagSet, args ...string) options {
 	var o options
-	fs.StringVar(&o.configPath, "config-path", defaultConfigPath, "Path to config.yaml.")
+	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
 	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
 
 	// TODO(fejta): switch dryRun to be a bool, defaulting to true after March 15, 2019.
@@ -57,6 +54,7 @@ func gatherOptions(fs *flag.FlagSet, args ...string) options {
 	o.kubernetes.AddFlags(fs)
 
 	fs.Parse(args)
+	o.configPath = config.ConfigPath(o.configPath)
 	return o
 }
 
@@ -73,19 +71,17 @@ func (o *options) Validate() error {
 }
 
 func main() {
+	logrusutil.ComponentInit("horologium")
+
 	o := gatherOptions(flag.NewFlagSet(os.Args[0], flag.ExitOnError), os.Args[1:]...)
 	if err := o.Validate(); err != nil {
 		logrus.WithError(err).Fatal("Invalid options")
 	}
 
-	logrus.SetFormatter(
-		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "horologium"}),
-	)
-
 	pjutil.ServePProf()
 
 	if !o.dryRun.Explicit {
-		logrus.Warning("Horologium requies --dry-run=false to function correctly in production.")
+		logrus.Warning("Horologium requires --dry-run=false to function correctly in production.")
 		logrus.Warning("--dry-run will soon default to true. Set --dry-run=false by March 15.")
 	}
 
@@ -150,7 +146,7 @@ func sync(prowJobClient prowJobClient, cfg *config.Config, cr cronClient, now ti
 			shouldTrigger := j.Complete() && now.Sub(j.Status.StartTime.Time) > p.GetInterval()
 			logger = logger.WithField("should-trigger", shouldTrigger)
 			if !previousFound || shouldTrigger {
-				prowJob := pjutil.NewProwJob(pjutil.PeriodicSpec(p), p.Labels)
+				prowJob := pjutil.NewProwJob(pjutil.PeriodicSpec(p), p.Labels, p.Annotations)
 				logger.WithFields(pjutil.ProwJobFields(&prowJob)).Info("Triggering new run of interval periodic.")
 				if _, err := prowJobClient.Create(&prowJob); err != nil {
 					errs = append(errs, err)
@@ -160,7 +156,7 @@ func sync(prowJobClient prowJobClient, cfg *config.Config, cr cronClient, now ti
 			shouldTrigger := j.Complete()
 			logger = logger.WithField("should-trigger", shouldTrigger)
 			if !previousFound || shouldTrigger {
-				prowJob := pjutil.NewProwJob(pjutil.PeriodicSpec(p), p.Labels)
+				prowJob := pjutil.NewProwJob(pjutil.PeriodicSpec(p), p.Labels, p.Annotations)
 				logger.WithFields(pjutil.ProwJobFields(&prowJob)).Info("Triggering new run of cron periodic.")
 				if _, err := prowJobClient.Create(&prowJob); err != nil {
 					errs = append(errs, err)

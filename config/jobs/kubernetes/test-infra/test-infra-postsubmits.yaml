@@ -15,31 +15,23 @@ postsubmits:
         image: busybox
         args: ["cat", "config/jobs/kubernetes/test-infra/test-infra-postsubmits.yaml"]
 
-  - name: ci-test-infra-bazel
+  - name: post-test-infra-bazel
     branches:
     - master
     decorate: true
     labels:
       preset-service-account: "true"
       preset-bazel-scratch-dir: "true"
-      preset-bazel-remote-cache-enabled: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-experimental
+      - image: launcher.gcr.io/google/bazel:0.27.0
         command:
-        - runner.sh
-        - ./scenarios/kubernetes_bazel.py
+        - hack/bazel.sh
         args:
-        - --build=//...
-        - --install=gubernator/test_requirements.txt
-        - --test=//...
-        - --test-args=--test_output=errors
-        # Bazel needs privileged mode in order to sandbox builds.
-        securityContext:
-          privileged: true
-        resources:
-          requests:
-            memory: "2Gi"
+        - test
+        - --config=ci
+        - --nobuild_tests_only
+        - //...
 
   - name: maintenance-boskos-config-upload
     branches:
@@ -50,10 +42,8 @@ postsubmits:
     decorate: true
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-experimental
+      - image: gcr.io/k8s-testimages/bazelbuild:v20190628-265d81f-0.27.0
         command:
-        - runner.sh
-        args:
         - ./boskos/update_prow_config.sh
         env:
         - name: PROW_SERVICE_ACCOUNT
@@ -73,15 +63,15 @@ postsubmits:
     labels:
       preset-service-account: "true"
       preset-bazel-scratch-dir: "true"
-    run_if_changed: '^testgrid/.*$'
+    run_if_changed: '^config/(jobs|testgrids)/.*$'
     decorate: true
     spec:
       containers:
-      - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-experimental
+      - image: gcr.io/k8s-testimages/bazelbuild:v20190628-265d81f-0.27.0
         command:
-        - runner.sh
-        args:
         - ./testgrid/config-upload.sh
         resources:
           requests:
             memory: "1Gi"
+    annotations:
+      testgrid-num-failures-to-alert: '2'

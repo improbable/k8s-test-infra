@@ -1,4 +1,6 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("@io_bazel_rules_docker//go:image.bzl", "go_image")
+load("//prow:def.bzl", "prow_image")
 
 go_library(
     name = "go_default_library",
@@ -20,6 +22,12 @@ go_library(
 go_binary(
     name = "aws-janitor",
     embed = [":go_default_library"],
+    visibility = ["//visibility:public"],
+)
+
+prow_image(
+    name = "image",
+    base = "@gcloud-go//image",
     visibility = ["//visibility:public"],
 )
 

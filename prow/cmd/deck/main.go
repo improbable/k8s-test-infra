@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -36,12 +37,15 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/NYTimes/gziphandler"
+	"github.com/gorilla/csrf"
 	"github.com/gorilla/sessions"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/github"
 	"google.golang.org/api/option"
 	coreapi "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -50,11 +54,14 @@ import (
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	prowv1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
+	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/deck/jobs"
 	prowflagutil "k8s.io/test-infra/prow/flagutil"
+	prowgithub "k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/githuboauth"
 	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/logrusutil"
+	"k8s.io/test-infra/prow/metrics"
 	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/pluginhelp"
 	"k8s.io/test-infra/prow/prstatus"
@@ -64,6 +71,7 @@ import (
 
 	"k8s.io/test-infra/prow/spyglass/lenses"
 	_ "k8s.io/test-infra/prow/spyglass/lenses/buildlog"
+	_ "k8s.io/test-infra/prow/spyglass/lenses/coverage"
 	_ "k8s.io/test-infra/prow/spyglass/lenses/junit"
 	_ "k8s.io/test-infra/prow/spyglass/lenses/metadata"
 )
@@ -73,6 +81,7 @@ type options struct {
 	jobConfigPath         string
 	buildCluster          string
 	kubernetes            prowflagutil.ExperimentalKubernetesOptions
+	github                prowflagutil.GitHubOptions
 	tideURL               string
 	hookURL               string
 	oauthURL              string
@@ -83,19 +92,38 @@ type options struct {
 	pregeneratedData      string
 	staticFilesLocation   string
 	templateFilesLocation string
+	showHidden            bool
 	spyglass              bool
 	spyglassFilesLocation string
 	gcsCredentialsFile    string
+	rerunCreatesJob       bool
+	allowInsecure         bool
+	dryRun                bool
 }
 
 func (o *options) Validate() error {
 	if err := o.kubernetes.Validate(false); err != nil {
 		return err
 	}
+	if err := o.github.Validate(o.dryRun); err != nil {
+		return err
+	}
 
 	if o.configPath == "" {
 		return errors.New("required flag --config-path was unset")
 	}
+
+	// TODO(Katharine): remove this handling after 2019-10-31
+	// We used to set a default value for --cookie-secret-file, but we also have code that
+	// assumes we don't. If it's not set, but it is required that it is, and a file exists
+	// at the old default, we set it back to that default and emit an error.
+	if o.cookieSecretFile == "" && o.oauthURL != "" {
+		if _, err := os.Stat("/etc/cookie/secret"); err == nil {
+			o.cookieSecretFile = "/etc/cookie/secret"
+			logrus.Error("You haven't set --cookie-secret-file, but you're assuming it is set to '/etc/cookie/secret'. Add --cookie-secret-file=/etc/cookie/secret to your deck instance's arguments. Your configuration will stop working at the end of October 2019.")
+		}
+	}
+
 	if o.oauthURL != "" {
 		if o.githubOAuthConfigFile == "" {
 			return errors.New("an OAuth URL was provided but required flag --github-oauth-config-file was unset")
@@ -104,31 +132,40 @@ func (o *options) Validate() error {
 			return errors.New("an OAuth URL was provided but required flag --cookie-secret was unset")
 		}
 	}
+
+	if o.hiddenOnly && o.showHidden {
+		return errors.New("'--hidden-only' and '--show-hidden' are mutually exclusive, the first one shows only hidden job, the second one shows both hidden and non-hidden jobs")
+	}
 	return nil
 }
 
-func gatherOptions() options {
-	o := options{}
-	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	fs.StringVar(&o.configPath, "config-path", "/etc/config/config.yaml", "Path to config.yaml.")
+func gatherOptions(fs *flag.FlagSet, args ...string) options {
+	var o options
+	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
 	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
 	fs.StringVar(&o.tideURL, "tide-url", "", "Path to tide. If empty, do not serve tide data.")
 	fs.StringVar(&o.hookURL, "hook-url", "", "Path to hook plugin help endpoint.")
 	fs.StringVar(&o.oauthURL, "oauth-url", "", "Path to deck user dashboard endpoint.")
 	fs.StringVar(&o.githubOAuthConfigFile, "github-oauth-config-file", "/etc/github/secret", "Path to the file containing the GitHub App Client secret.")
-	fs.StringVar(&o.cookieSecretFile, "cookie-secret", "/etc/cookie/secret", "Path to the file containing the cookie secret key.")
+	fs.StringVar(&o.cookieSecretFile, "cookie-secret", "", "Path to the file containing the cookie secret key.")
 	// use when behind a load balancer
 	fs.StringVar(&o.redirectHTTPTo, "redirect-http-to", "", "Host to redirect http->https to based on x-forwarded-proto == http.")
 	// use when behind an oauth proxy
 	fs.BoolVar(&o.hiddenOnly, "hidden-only", false, "Show only hidden jobs. Useful for serving hidden jobs behind an oauth proxy.")
 	fs.StringVar(&o.pregeneratedData, "pregenerated-data", "", "Use API output from another prow instance. Used by the prow/cmd/deck/runlocal script")
+	fs.BoolVar(&o.showHidden, "show-hidden", false, "Show all jobs, including hidden ones")
 	fs.BoolVar(&o.spyglass, "spyglass", false, "Use Prow built-in job viewing instead of Gubernator")
 	fs.StringVar(&o.spyglassFilesLocation, "spyglass-files-location", "/lenses", "Location of the static files for spyglass.")
 	fs.StringVar(&o.staticFilesLocation, "static-files-location", "/static", "Path to the static files")
 	fs.StringVar(&o.templateFilesLocation, "template-files-location", "/template", "Path to the template files")
 	fs.StringVar(&o.gcsCredentialsFile, "gcs-credentials-file", "", "Path to the GCS credentials file")
+	fs.BoolVar(&o.rerunCreatesJob, "rerun-creates-job", false, "Change the re-run option in Deck to actually create the job. **WARNING:** Only use this with non-public deck instances, otherwise strangers can DOS your Prow instance")
+	fs.BoolVar(&o.allowInsecure, "allow-insecure", false, "Allows insecure requests for CSRF and GitHub oauth.")
+	fs.BoolVar(&o.dryRun, "dry-run", false, "Whether or not to make mutating API calls to GitHub.")
 	o.kubernetes.AddFlags(fs)
-	fs.Parse(os.Args[1:])
+	o.github.AddFlagsWithoutDefaultGitHubTokenPath(fs)
+	fs.Parse(args)
+	o.configPath = config.ConfigPath(o.configPath)
 	return o
 }
 
@@ -136,15 +173,98 @@ func staticHandlerFromDir(dir string) http.Handler {
 	return gziphandler.GzipHandler(handleCached(http.FileServer(http.Dir(dir))))
 }
 
-func main() {
-	o := gatherOptions()
-	if err := o.Validate(); err != nil {
-		logrus.Fatalf("Invalid options: %v", err)
+var (
+	deckMetrics = struct {
+		httpRequestDuration *prometheus.HistogramVec
+		httpResponseSize    *prometheus.HistogramVec
+	}{
+		httpRequestDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "deck_http_request_duration_seconds",
+				Help:    "http request duration in seconds",
+				Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+			},
+			[]string{"path", "method", "status"},
+		),
+		httpResponseSize: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "deck_http_response_size_bytes",
+				Help:    "http response size in bytes",
+				Buckets: []float64{16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608, 16777216},
+			},
+			[]string{"path", "method", "status"},
+		),
 	}
+)
 
-	logrus.SetFormatter(
-		logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "deck"}),
-	)
+type authCfgGetter func() *prowapi.RerunAuthConfig
+
+type traceResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	size       int
+}
+
+func (trw *traceResponseWriter) WriteHeader(code int) {
+	trw.statusCode = code
+	trw.ResponseWriter.WriteHeader(code)
+}
+
+func (trw *traceResponseWriter) Write(data []byte) (int, error) {
+	size, err := trw.ResponseWriter.Write(data)
+	trw.size += size
+	return size, err
+}
+
+func init() {
+	prometheus.MustRegister(deckMetrics.httpRequestDuration)
+	prometheus.MustRegister(deckMetrics.httpResponseSize)
+}
+
+func traceHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t := time.Now()
+		// Initialize the status to 200 in case WriteHeader is not called
+		trw := &traceResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		h.ServeHTTP(trw, r)
+		latency := time.Since(t)
+		labels := prometheus.Labels{"path": getPathPrefix(r.URL.Path), "method": r.Method, "status": strconv.Itoa(trw.statusCode)}
+		deckMetrics.httpRequestDuration.With(labels).Observe(latency.Seconds())
+		deckMetrics.httpResponseSize.With(labels).Observe(float64(trw.size))
+	})
+}
+
+func getPathPrefix(path string) string {
+	prefixes := []string{
+		"/tide",
+		"/plugin-help.js",
+		"/data.js",
+		"/prowjobs.js",
+		"/pr-data.js",
+		"/log",
+		"/rerun",
+		"/prowjob",
+		"/spyglass/",
+		"/view/",
+		"/job-history/",
+		"/pr-history/"}
+
+	for _, p := range prefixes {
+		if strings.HasPrefix(path, p) {
+			return p
+		}
+	}
+	// for other cases
+	return "others"
+}
+
+func main() {
+	logrusutil.ComponentInit("deck")
+
+	o := gatherOptions(flag.NewFlagSet(os.Args[0], flag.ExitOnError), os.Args[1:]...)
+	if err := o.Validate(); err != nil {
+		logrus.WithError(err).Fatal("Invalid options")
+	}
 
 	pjutil.ServePProf()
 
@@ -155,12 +275,12 @@ func main() {
 	}
 	cfg := configAgent.Config
 
+	metrics.ExposeMetrics("deck", cfg().PushGateway)
+
 	// signal to the world that we are healthy
 	// this needs to be in a separate port as we don't start the
 	// main server with the main mux until we're ready
-	healthMux := http.NewServeMux()
-	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "OK") })
-	go func() { logrus.WithError(http.ListenAndServe(":8081", healthMux)).Fatal("ListenAndServe returned.") }()
+	health := pjutil.NewHealth()
 
 	mux := http.NewServeMux()
 	// setup common handlers for local and deployed runs
@@ -175,8 +295,6 @@ func main() {
 	mux.Handle("/tide", gziphandler.GzipHandler(handleSimpleTemplate(o, cfg, "tide.html", nil)))
 	mux.Handle("/tide-history", gziphandler.GzipHandler(handleSimpleTemplate(o, cfg, "tide-history.html", nil)))
 	mux.Handle("/plugins", gziphandler.GzipHandler(handleSimpleTemplate(o, cfg, "plugins.html", nil)))
-
-	indexHandler := handleSimpleTemplate(o, cfg, "index.html", struct{ SpyglassEnabled bool }{o.spyglass})
 
 	runLocal := o.pregeneratedData != ""
 
@@ -193,6 +311,14 @@ func main() {
 			fallbackHandler(w, r)
 			return
 		}
+		indexHandler := handleSimpleTemplate(o, cfg, "index.html", struct {
+			SpyglassEnabled bool
+			ReRunCreatesJob bool
+			AllowAnyone     bool
+		}{
+			SpyglassEnabled: o.spyglass,
+			ReRunCreatesJob: o.rerunCreatesJob,
+			AllowAnyone:     cfg().Deck.RerunAuthConfig.AllowAnyone})
 		indexHandler(w, r)
 	})
 
@@ -203,9 +329,52 @@ func main() {
 	}
 
 	// signal to the world that we're ready
-	healthMux.HandleFunc("/healthz/ready", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "OK") })
+	health.ServeReady()
+
+	// cookie secret will be used for CSRF protection and should be exactly 32 bytes
+	// we sometimes accept different lengths to stay backwards compatible
+	var csrfToken []byte
+	if o.cookieSecretFile != "" {
+		cookieSecretRaw, err := loadToken(o.cookieSecretFile)
+		if err != nil {
+			logrus.WithError(err).Fatal("Could not read cookie secret file")
+		}
+		decodedSecret, err := base64.StdEncoding.DecodeString(string(cookieSecretRaw))
+		if err != nil {
+			logrus.WithError(err).Fatal("Error decoding cookie secret")
+		}
+		if len(decodedSecret) == 32 {
+			csrfToken = decodedSecret
+		}
+		if len(decodedSecret) > 32 {
+			logrus.Warning("Cookie secret should be exactly 32 bytes. Consider truncating the existing cookie to that length")
+			hash := sha256.Sum256(decodedSecret)
+			csrfToken = hash[:]
+		}
+		if len(decodedSecret) < 32 {
+			if o.rerunCreatesJob {
+				logrus.Fatal("Cookie secret must be exactly 32 bytes")
+				return
+			}
+			logrus.Warning("Cookie secret should be exactly 32 bytes")
+		}
+	}
+
+	// if we allow direct reruns, we must protect against CSRF in all post requests using the cookie secret as a token
+	// for more information about CSRF, see https://github.com/kubernetes/test-infra/blob/master/prow/cmd/deck/csrf.md
+	if o.rerunCreatesJob && csrfToken == nil {
+		logrus.Fatal("Rerun creates job cannot be enabled without CSRF protection, which requires --cookie-secret to be exactly 32 bytes")
+		return
+	}
+
+	if csrfToken != nil {
+		CSRF := csrf.Protect(csrfToken, csrf.Path("/"), csrf.Secure(!o.allowInsecure))
+		logrus.WithError(http.ListenAndServe(":8080", CSRF(traceHandler(mux)))).Fatal("ListenAndServe returned.")
+		return
+	}
 	// setup done, actually start the server
-	logrus.WithError(http.ListenAndServe(":8080", mux)).Fatal("ListenAndServe returned.")
+	logrus.WithError(http.ListenAndServe(":8080", traceHandler(mux))).Fatal("ListenAndServe returned.")
+
 }
 
 // localOnlyMain contains logic used only when running locally, and is mutually exclusive with
@@ -237,6 +406,7 @@ type filteringProwJobLister struct {
 	client      prowv1.ProwJobInterface
 	hiddenRepos sets.String
 	hiddenOnly  bool
+	showHidden  bool
 }
 
 func (c *filteringProwJobLister) ListProwJobs(selector string) ([]prowapi.ProwJob, error) {
@@ -258,7 +428,9 @@ func (c *filteringProwJobLister) ListProwJobs(selector string) ([]prowapi.ProwJo
 			refs = &item.Spec.ExtraRefs[0]
 		}
 		shouldHide := c.hiddenRepos.HasAny(fmt.Sprintf("%s/%s", refs.Org, refs.Repo), refs.Org)
-		if shouldHide == c.hiddenOnly {
+		if shouldHide && c.showHidden {
+			filtered = append(filtered, item)
+		} else if shouldHide == c.hiddenOnly {
 			// this is a hidden job, show it if we're asked
 			// to only show hidden jobs otherwise hide it
 			filtered = append(filtered, item)
@@ -288,15 +460,19 @@ func prodOnlyMain(cfg config.Getter, o options, mux *http.ServeMux) *http.ServeM
 		client:      prowJobClient,
 		hiddenRepos: sets.NewString(cfg().Deck.HiddenRepos...),
 		hiddenOnly:  o.hiddenOnly,
+		showHidden:  o.showHidden,
 	}, podLogClients, cfg)
 	ja.Start()
+
+	cfgGetter := func() *prowapi.RerunAuthConfig { return &cfg().Deck.RerunAuthConfig }
 
 	// setup prod only handlers
 	mux.Handle("/data.js", gziphandler.GzipHandler(handleData(ja)))
 	mux.Handle("/prowjobs.js", gziphandler.GzipHandler(handleProwJobs(ja)))
 	mux.Handle("/badge.svg", gziphandler.GzipHandler(handleBadge(ja)))
 	mux.Handle("/log", gziphandler.GzipHandler(handleLog(ja)))
-	mux.Handle("/rerun", gziphandler.GzipHandler(handleRerun(prowJobClient)))
+
+	mux.Handle("/prowjob", gziphandler.GzipHandler(handleProwJob(prowJobClient)))
 
 	if o.spyglass {
 		initSpyglass(cfg, o, mux, ja)
@@ -312,17 +488,21 @@ func prodOnlyMain(cfg config.Getter, o options, mux *http.ServeMux) *http.ServeM
 			log:  logrus.WithField("agent", "tide"),
 			path: o.tideURL,
 			updatePeriod: func() time.Duration {
-				return cfg().Deck.TideUpdatePeriod
+				return cfg().Deck.TideUpdatePeriod.Duration
 			},
 			hiddenRepos: cfg().Deck.HiddenRepos,
 			hiddenOnly:  o.hiddenOnly,
+			showHidden:  o.showHidden,
 		}
 		ta.start()
 		mux.Handle("/tide.js", gziphandler.GzipHandler(handleTidePools(cfg, ta)))
 		mux.Handle("/tide-history.js", gziphandler.GzipHandler(handleTideHistory(ta)))
 	}
 
+	// We use the GH client to resolve GH teams when determining who is permitted to rerun a job.
+	var githubClient prowgithub.Client
 	// Enable Git OAuth feature if oauthURL is provided.
+	var goa *githuboauth.Agent
 	if o.oauthURL != "" {
 		githubOAuthConfigRaw, err := loadToken(o.githubOAuthConfigFile)
 		if err != nil {
@@ -352,13 +532,25 @@ func prodOnlyMain(cfg config.Getter, o options, mux *http.ServeMux) *http.ServeM
 		cookie := sessions.NewCookieStore(decodedSecret)
 		githubOAuthConfig.InitGitHubOAuthConfig(cookie)
 
-		goa := githuboauth.NewAgent(&githubOAuthConfig, logrus.WithField("client", "githuboauth"))
-		oauthClient := &oauth2.Config{
+		goa = githuboauth.NewAgent(&githubOAuthConfig, logrus.WithField("client", "githuboauth"))
+		oauthClient := githuboauth.NewClient(&oauth2.Config{
 			ClientID:     githubOAuthConfig.ClientID,
 			ClientSecret: githubOAuthConfig.ClientSecret,
 			RedirectURL:  githubOAuthConfig.RedirectURL,
 			Scopes:       githubOAuthConfig.Scopes,
 			Endpoint:     github.Endpoint,
+		},
+		)
+
+		secretAgent := &secret.Agent{}
+		if o.github.TokenPath != "" {
+			if err := secretAgent.Start([]string{o.github.TokenPath}); err != nil {
+				logrus.WithError(err).Fatal("Error starting secrets agent.")
+			}
+			githubClient, err = o.github.GitHubClient(secretAgent, o.dryRun)
+			if err != nil {
+				logrus.WithError(err).Fatal("Error getting GitHub client.")
+			}
 		}
 
 		repoSet := make(map[string]bool)
@@ -382,13 +574,17 @@ func prodOnlyMain(cfg config.Getter, o options, mux *http.ServeMux) *http.ServeM
 			&githubOAuthConfig,
 			logrus.WithField("client", "pr-status"))
 
+		secure := !o.allowInsecure
+
 		mux.Handle("/pr-data.js", handleNotCached(
 			prStatusAgent.HandlePrStatus(prStatusAgent)))
 		// Handles login request.
-		mux.Handle("/github-login", goa.HandleLogin(oauthClient))
+		mux.Handle("/github-login", goa.HandleLogin(oauthClient, secure))
 		// Handles redirect from GitHub OAuth server.
-		mux.Handle("/github-login/redirect", goa.HandleRedirect(oauthClient, githuboauth.NewGitHubClientGetter()))
+		mux.Handle("/github-login/redirect", goa.HandleRedirect(oauthClient, githuboauth.NewGitHubClientGetter(), secure))
 	}
+
+	mux.Handle("/rerun", gziphandler.GzipHandler(handleRerun(prowJobClient, o.rerunCreatesJob, cfgGetter, goa, githuboauth.NewGitHubClientGetter(), githubClient)))
 
 	// optionally inject http->https redirect handler when behind loadbalancer
 	if o.redirectHTTPTo != "" {
@@ -427,7 +623,7 @@ func initSpyglass(cfg config.Getter, o options, mux *http.ServeMux, ja *jobs.Job
 	if err != nil {
 		logrus.WithError(err).Fatal("Error getting GCS client")
 	}
-	sg := spyglass.New(ja, cfg, c, context.Background())
+	sg := spyglass.New(ja, cfg, c, o.gcsCredentialsFile, context.Background())
 	sg.Start()
 
 	mux.Handle("/spyglass/static/", http.StripPrefix("/spyglass/static", staticHandlerFromDir(o.spyglassFilesLocation)))
@@ -479,6 +675,18 @@ func setHeadersNoCaching(w http.ResponseWriter) {
 	w.Header().Set("Expires", "0")
 }
 
+func writeJSONResponse(w http.ResponseWriter, r *http.Request, d []byte) {
+	// If we have a "var" query, then write out "var value = {...};".
+	// Otherwise, just write out the JSON.
+	if v := r.URL.Query().Get("var"); v != "" {
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprintf(w, "var %s = %s;", v, string(d))
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, string(d))
+	}
+}
+
 func handleNotCached(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setHeadersNoCaching(w)
@@ -502,13 +710,7 @@ func handleProwJobs(ja *jobs.JobAgent) http.HandlerFunc {
 			logrus.WithError(err).Error("Error marshaling jobs.")
 			jd = []byte("{}")
 		}
-		// If we have a "var" query, then write out "var value = {...};".
-		// Otherwise, just write out the JSON.
-		if v := r.URL.Query().Get("var"); v != "" {
-			fmt.Fprintf(w, "var %s = %s;", v, string(jd))
-		} else {
-			fmt.Fprint(w, string(jd))
-		}
+		writeJSONResponse(w, r, jd)
 	}
 }
 
@@ -521,13 +723,7 @@ func handleData(ja *jobs.JobAgent) http.HandlerFunc {
 			logrus.WithError(err).Error("Error marshaling jobs.")
 			jd = []byte("[]")
 		}
-		// If we have a "var" query, then write out "var value = {...};".
-		// Otherwise, just write out the JSON.
-		if v := r.URL.Query().Get("var"); v != "" {
-			fmt.Fprintf(w, "var %s = %s;", v, string(jd))
-		} else {
-			fmt.Fprint(w, string(jd))
-		}
+		writeJSONResponse(w, r, jd)
 	}
 }
 
@@ -617,7 +813,8 @@ func handleRequestJobViews(sg *spyglass.Spyglass, cfg config.Getter, o options) 
 		setHeadersNoCaching(w)
 		src := strings.TrimPrefix(r.URL.Path, "/view/")
 
-		page, err := renderSpyglass(sg, cfg, src, o)
+		csrfToken := csrf.Token(r)
+		page, err := renderSpyglass(sg, cfg, src, o, csrfToken)
 		if err != nil {
 			logrus.WithError(err).Error("error rendering spyglass page")
 			message := fmt.Sprintf("error rendering spyglass page: %v", err)
@@ -636,7 +833,7 @@ func handleRequestJobViews(sg *spyglass.Spyglass, cfg config.Getter, o options) 
 }
 
 // renderSpyglass returns a pre-rendered Spyglass page from the given source string
-func renderSpyglass(sg *spyglass.Spyglass, cfg config.Getter, src string, o options) (string, error) {
+func renderSpyglass(sg *spyglass.Spyglass, cfg config.Getter, src string, o options, csrfToken string) (string, error) {
 	renderStart := time.Now()
 
 	src = strings.TrimSuffix(src, "/")
@@ -654,34 +851,65 @@ func renderSpyglass(sg *spyglass.Spyglass, cfg config.Getter, src string, o opti
 		return "", fmt.Errorf("found no artifacts for %s", src)
 	}
 
-	viewerCache := map[string][]string{}
-	viewersRegistry := cfg().Deck.Spyglass.Viewers
 	regexCache := cfg().Deck.Spyglass.RegexCache
-
-	for re, viewerNames := range viewersRegistry {
-		matches := []string{}
-		for _, a := range artifactNames {
-			if regexCache[re].MatchString(a) {
-				matches = append(matches, a)
+	lensCache := map[int][]string{}
+	var lensIndexes []int
+lensesLoop:
+	for i, lfc := range cfg().Deck.Spyglass.Lenses {
+		matches := map[string]struct{}{}
+		for _, re := range lfc.RequiredFiles {
+			found := false
+			for _, a := range artifactNames {
+				if regexCache[re].MatchString(a) {
+					matches[a] = struct{}{}
+					found = true
+				}
+			}
+			if !found {
+				continue lensesLoop
 			}
 		}
-		if len(matches) > 0 {
-			for _, vName := range viewerNames {
-				viewerCache[vName] = matches
+
+		for _, re := range lfc.OptionalFiles {
+			for _, a := range artifactNames {
+				if regexCache[re].MatchString(a) {
+					matches[a] = struct{}{}
+				}
 			}
 		}
+
+		matchSlice := make([]string, 0, len(matches))
+		for k := range matches {
+			matchSlice = append(matchSlice, k)
+		}
+
+		lensCache[i] = matchSlice
+		lensIndexes = append(lensIndexes, i)
 	}
 
-	ls := sg.Lenses(viewerCache)
-	lensNames := []string{}
-	for _, l := range ls {
-		lensNames = append(lensNames, l.Config().Name)
-	}
+	lensIndexes, ls := sg.Lenses(lensIndexes)
 
 	jobHistLink := ""
 	jobPath, err := sg.JobPath(src)
 	if err == nil {
 		jobHistLink = path.Join("/job-history", jobPath)
+	}
+
+	var prowJobLink string
+	prowJobName, err := sg.ProwJobName(src)
+	if err == nil {
+		if prowJobName != "" {
+			u, err := url.Parse("/prowjob")
+			if err != nil {
+				return "", fmt.Errorf("error parsing prowjob path: %v", err)
+			}
+			query := url.Values{}
+			query.Set("prowjob", prowJobName)
+			u.RawQuery = query.Encode()
+			prowJobLink = u.String()
+		}
+	} else {
+		logrus.WithError(err).Warningf("Error getting ProwJob name for source %q.", src)
 	}
 
 	artifactsLink := ""
@@ -706,6 +934,12 @@ func renderSpyglass(sg *spyglass.Spyglass, cfg config.Getter, src string, o opti
 	jobName, buildID, err := sg.KeyToJob(src)
 	if err != nil {
 		return "", fmt.Errorf("error determining jobName / buildID: %v", err)
+	}
+
+	prLink := ""
+	j, err := sg.JobAgent.GetProwJob(jobName, buildID)
+	if err == nil && j.Spec.Refs != nil && len(j.Spec.Refs.Pulls) > 0 {
+		prLink = j.Spec.Refs.Pulls[0].Link
 	}
 
 	announcement := ""
@@ -743,36 +977,40 @@ func renderSpyglass(sg *spyglass.Spyglass, cfg config.Getter, src string, o opti
 
 	var viewBuf bytes.Buffer
 	type lensesTemplate struct {
-		Lenses        []lenses.Lens
-		LensNames     []string
+		Lenses        map[int]lenses.Lens
+		LensIndexes   []int
 		Source        string
-		LensArtifacts map[string][]string
+		LensArtifacts map[int][]string
 		JobHistLink   string
+		ProwJobLink   string
 		ArtifactsLink string
 		PRHistLink    string
 		Announcement  template.HTML
 		TestgridLink  string
 		JobName       string
 		BuildID       string
+		PRLink        string
 		ExtraLinks    []spyglass.ExtraLink
 	}
 	lTmpl := lensesTemplate{
 		Lenses:        ls,
-		LensNames:     lensNames,
+		LensIndexes:   lensIndexes,
 		Source:        src,
-		LensArtifacts: viewerCache,
+		LensArtifacts: lensCache,
 		JobHistLink:   jobHistLink,
+		ProwJobLink:   prowJobLink,
 		ArtifactsLink: artifactsLink,
 		PRHistLink:    prHistLink,
 		Announcement:  template.HTML(announcement),
 		TestgridLink:  tgLink,
 		JobName:       jobName,
 		BuildID:       buildID,
+		PRLink:        prLink,
 		ExtraLinks:    extraLinks,
 	}
 	t := template.New("spyglass.html")
 
-	if _, err := prepareBaseTemplate(o, cfg, t); err != nil {
+	if _, err := prepareBaseTemplate(o, cfg, csrfToken, t); err != nil {
 		return "", fmt.Errorf("error preparing base template: %v", err)
 	}
 	t, err = t.ParseFiles(path.Join(o.templateFilesLocation, "spyglass.html"))
@@ -847,8 +1085,8 @@ func handleArtifactView(o options, sg *spyglass.Spyglass, cfg config.Getter) htt
 			}{
 				lensConfig.Title,
 				"/spyglass/static/" + lensName + "/",
-				template.HTML(lens.Header(artifacts, lensResourcesDir)),
-				template.HTML(lens.Body(artifacts, lensResourcesDir, "")),
+				template.HTML(lens.Header(artifacts, lensResourcesDir, cfg().Deck.Spyglass.Lenses[request.Index].Lens.Config)),
+				template.HTML(lens.Body(artifacts, lensResourcesDir, "", cfg().Deck.Spyglass.Lenses[request.Index].Lens.Config)),
 			})
 		case "rerender":
 			data, err := ioutil.ReadAll(r.Body)
@@ -857,14 +1095,14 @@ func handleArtifactView(o options, sg *spyglass.Spyglass, cfg config.Getter) htt
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; encoding=utf-8")
-			w.Write([]byte(lens.Body(artifacts, lensResourcesDir, string(data))))
+			w.Write([]byte(lens.Body(artifacts, lensResourcesDir, string(data), cfg().Deck.Spyglass.Lenses[request.Index].Lens.Config)))
 		case "callback":
 			data, err := ioutil.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusInternalServerError)
 				return
 			}
-			w.Write([]byte(lens.Callback(artifacts, lensResourcesDir, string(data))))
+			w.Write([]byte(lens.Callback(artifacts, lensResourcesDir, string(data), cfg().Deck.Spyglass.Lenses[request.Index].Lens.Config)))
 		default:
 			http.NotFound(w, r)
 		}
@@ -894,13 +1132,7 @@ func handleTidePools(cfg config.Getter, ta *tideAgent) http.HandlerFunc {
 			logrus.WithError(err).Error("Error marshaling payload.")
 			pd = []byte("{}")
 		}
-		// If we have a "var" query, then write out "var value = {...};".
-		// Otherwise, just write out the JSON.
-		if v := r.URL.Query().Get("var"); v != "" {
-			fmt.Fprintf(w, "var %s = %s;", v, string(pd))
-		} else {
-			fmt.Fprint(w, string(pd))
-		}
+		writeJSONResponse(w, r, pd)
 	}
 }
 
@@ -920,13 +1152,7 @@ func handleTideHistory(ta *tideAgent) http.HandlerFunc {
 			logrus.WithError(err).Error("Error marshaling payload.")
 			pd = []byte("{}")
 		}
-		// If we have a "var" query, then write out "var value = {...};".
-		// Otherwise, just write out the JSON.
-		if v := r.URL.Query().Get("var"); v != "" {
-			fmt.Fprintf(w, "var %s = %s;", v, string(pd))
-		} else {
-			fmt.Fprint(w, string(pd))
-		}
+		writeJSONResponse(w, r, pd)
 	}
 }
 
@@ -943,13 +1169,7 @@ func handlePluginHelp(ha *helpAgent) http.HandlerFunc {
 			logrus.WithError(err).Error("Marshaling plugin help.")
 			b = []byte("[]")
 		}
-		// If we have a "var" query, then write out "var value = [...];".
-		// Otherwise, just write out the JSON.
-		if v := r.URL.Query().Get("var"); v != "" {
-			fmt.Fprintf(w, "var %s = %s;", v, string(b))
-		} else {
-			fmt.Fprint(w, string(b))
-		}
+		writeJSONResponse(w, r, b)
 	}
 }
 
@@ -974,10 +1194,14 @@ func handleLog(lc logClient) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("Log not found: %v", err), http.StatusNotFound)
 			logger := logger.WithError(err)
 			msg := "Log not found."
-			if strings.Contains(err.Error(), "PodInitializing") {
+			if strings.Contains(err.Error(), "PodInitializing") || strings.Contains(err.Error(), "not found") ||
+				strings.Contains(err.Error(), "terminated") {
 				// PodInitializing is really common and not something
 				// that has any actionable items for administrators
-				// monitoring logs, so we should log it as information
+				// monitoring logs, so we should log it as information.
+				// Similarly, if a user asks us to proxy through logs
+				// for a Pod or ProwJob that doesn't exit, it's not
+				// something an administrator wants to see in logs.
 				logger.Info(msg)
 			} else {
 				logger.Warning(msg)
@@ -1003,9 +1227,77 @@ func validateLogRequest(r *http.Request) error {
 	return nil
 }
 
-func handleRerun(prowJobClient prowv1.ProwJobInterface) http.HandlerFunc {
+func handleProwJob(prowJobClient prowv1.ProwJobInterface) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("prowjob")
+		if name == "" {
+			http.Error(w, "request did not provide the 'prowjob' query parameter", http.StatusBadRequest)
+			return
+		}
+		pj, err := prowJobClient.Get(name, metav1.GetOptions{})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("ProwJob not found: %v", err), http.StatusNotFound)
+			if !kerrors.IsNotFound(err) {
+				// admins only care about errors other than not found
+				logrus.WithError(err).Warning("ProwJob not found.")
+			}
+			return
+		}
+		b, err := yaml.Marshal(&pj)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error marshaling: %v", err), http.StatusInternalServerError)
+			logrus.WithError(err).Error("Error marshaling jobs.")
+			return
+		}
+		if _, err := w.Write(b); err != nil {
+			logrus.WithError(err).Error("Error writing job.")
+		}
+	}
+}
+
+// canTriggerJob determines whether the given user can trigger any job.
+func canTriggerJob(user string, pj prowapi.ProwJob, cfg *prowapi.RerunAuthConfig, cli prowgithub.RerunClient) (bool, error) {
+	auth, err := cfg.IsAuthorized(user, cli)
+	if auth {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	jobPermissions := pj.Spec.RerunAuthConfig
+	auth, err = jobPermissions.IsAuthorized(user, cli)
+	if auth {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if cli == nil {
+		logrus.Warning("No GitHub token was provided, so we cannot retrieve GitHub teams")
+	}
+	return false, nil
+}
+
+func marshalJob(w http.ResponseWriter, pj prowapi.ProwJob, l *logrus.Entry) {
+	b, err := yaml.Marshal(&pj)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error marshaling: %v", err), http.StatusInternalServerError)
+		l.WithError(err).Error("Error marshaling job.")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	if _, err := w.Write(b); err != nil {
+		l.WithError(err).Error("Error writing log.")
+	}
+}
+
+// handleRerun triggers a rerun of the given job if that features is enabled, it receives a
+// POST request, and the user has the necessary permissions. Otherwise, it writes the config
+// for a new job but does not trigger it.
+func handleRerun(prowJobClient prowv1.ProwJobInterface, createProwJob bool, cfg authCfgGetter, goa *githuboauth.Agent, ghc githuboauth.GitHubClientGetter, cli prowgithub.RerunClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("prowjob")
+		l := logrus.WithField("prowjob", name)
 		if name == "" {
 			http.Error(w, "request did not provide the 'name' query parameter", http.StatusBadRequest)
 			return
@@ -1013,18 +1305,71 @@ func handleRerun(prowJobClient prowv1.ProwJobInterface) http.HandlerFunc {
 		pj, err := prowJobClient.Get(name, metav1.GetOptions{})
 		if err != nil {
 			http.Error(w, fmt.Sprintf("ProwJob not found: %v", err), http.StatusNotFound)
-			logrus.WithError(err).Warning("ProwJob not found.")
+			if !kerrors.IsNotFound(err) {
+				// admins only care about errors other than not found
+				l.WithError(err).Warning("ProwJob not found.")
+			}
 			return
 		}
-		pjutil := pjutil.NewProwJob(pj.Spec, pj.ObjectMeta.Labels)
-		b, err := yaml.Marshal(&pjutil)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Error marshaling: %v", err), http.StatusInternalServerError)
-			logrus.WithError(err).Error("Error marshaling jobs.")
+		newPJ := pjutil.NewProwJob(pj.Spec, pj.ObjectMeta.Labels, pj.ObjectMeta.Annotations)
+		switch r.Method {
+		case http.MethodGet:
+			marshalJob(w, newPJ, l)
+		case http.MethodPost:
+			if !createProwJob {
+				http.Error(w, "Direct rerun feature is not enabled. Enable with the '--rerun-creates-job' flag.", http.StatusMethodNotAllowed)
+				return
+			}
+			authConfig := cfg()
+			var allowed bool
+			if authConfig.AllowAnyone || pj.Spec.RerunAuthConfig.AllowAnyone {
+				// Skip getting the users login via GH oauth if anyone is allowed to rerun
+				// jobs so that GH oauth doesn't need to be set up for private Prows.
+				allowed = true
+			} else {
+				if goa == nil {
+					msg := "GitHub oauth must be configured to rerun jobs unless 'allow_anyone: true' is specified."
+					http.Error(w, msg, http.StatusInternalServerError)
+					l.Error(msg)
+					return
+				}
+				login, err := goa.GetLogin(r, ghc)
+				if err != nil {
+					l.WithError(err).Errorf("Error retrieving GitHub login")
+					http.Error(w, "Error retrieving GitHub login", http.StatusUnauthorized)
+					return
+				}
+				allowed, err = canTriggerJob(login, newPJ, authConfig, cli)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("Error checking if user can trigger job: %v", err), http.StatusInternalServerError)
+					l.WithError(err).Errorf("Error checking if user can trigger job")
+					return
+				}
+				logrus.WithFields(logrus.Fields{
+					"user":    login,
+					"job":     newPJ.Spec.Job,
+					"allowed": allowed,
+				}).Info("Attempted rerun")
+			}
+
+			if !allowed {
+				if _, err = w.Write([]byte("You don't have permission to rerun that job")); err != nil {
+					l.WithError(err).Error("Error writing to rerun response.")
+				}
+				return
+			}
+			if _, err := prowJobClient.Create(&newPJ); err != nil {
+				l.WithError(err).Error("Error creating job")
+				http.Error(w, fmt.Sprintf("Error creating job: %v", err), http.StatusInternalServerError)
+				return
+			}
+			if _, err = w.Write([]byte("Job successfully triggered. Wait 30 seconds and refresh the page for the job to show up")); err != nil {
+				l.WithError(err).Error("Error writing to rerun response.")
+			}
 			return
-		}
-		if _, err := w.Write(b); err != nil {
-			logrus.WithError(err).Error("Error writing log.")
+		default:
+			http.Error(w, fmt.Sprintf("bad verb %v", r.Method), http.StatusMethodNotAllowed)
+			return
 		}
 	}
 }
@@ -1040,6 +1385,7 @@ func handleConfig(cfg config.Getter) http.HandlerFunc {
 			http.Error(w, "Failed to marhshal config.", http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "text/plain")
 		buff := bytes.NewBuffer(b)
 		_, err = buff.WriteTo(w)
 		if err != nil {
@@ -1062,6 +1408,5 @@ func handleFavicon(staticFilesLocation string, cfg config.Getter) http.HandlerFu
 
 func isValidatedGitOAuthConfig(githubOAuthConfig *config.GitHubOAuthConfig) bool {
 	return githubOAuthConfig.ClientID != "" && githubOAuthConfig.ClientSecret != "" &&
-		githubOAuthConfig.RedirectURL != "" &&
-		githubOAuthConfig.FinalRedirectURL != ""
+		githubOAuthConfig.RedirectURL != ""
 }

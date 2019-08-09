@@ -56,7 +56,7 @@ func (lens Lens) Config() lenses.LensConfig {
 }
 
 // Header renders the <head> from template.html.
-func (lens Lens) Header(artifacts []lenses.Artifact, resourceDir string) string {
+func (lens Lens) Header(artifacts []lenses.Artifact, resourceDir string, config json.RawMessage) string {
 	t, err := template.ParseFiles(filepath.Join(resourceDir, "template.html"))
 	if err != nil {
 		return fmt.Sprintf("<!-- FAILED LOADING HEADER: %v -->", err)
@@ -69,12 +69,12 @@ func (lens Lens) Header(artifacts []lenses.Artifact, resourceDir string) string 
 }
 
 // Callback does nothing.
-func (lens Lens) Callback(artifacts []lenses.Artifact, resourceDir string, data string) string {
+func (lens Lens) Callback(artifacts []lenses.Artifact, resourceDir string, data string, config json.RawMessage) string {
 	return ""
 }
 
 // Body creates a view for prow job metadata.
-func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data string) string {
+func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data string, config json.RawMessage) string {
 	var buf bytes.Buffer
 	type MetadataViewData struct {
 		Status       string
@@ -114,6 +114,7 @@ func (lens Lens) Body(artifacts []lenses.Artifact, resourceDir string, data stri
 			metadataViewData.Elapsed =
 				metadataViewData.FinishedTime.Sub(metadataViewData.StartTime)
 		}
+		metadataViewData.Elapsed = metadataViewData.Elapsed.Round(time.Second)
 	}
 
 	metadataViewData.Metadata = map[string]string{"node": started.Node}

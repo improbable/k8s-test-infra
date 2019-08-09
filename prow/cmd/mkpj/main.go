@@ -47,9 +47,59 @@ type options struct {
 	org        string
 	repo       string
 
+	local bool
+
 	github       prowflagutil.GitHubOptions
 	githubClient githubClient
 	pullRequest  *github.PullRequest
+}
+
+func (o *options) genJobSpec(conf *config.Config, name string) (config.JobBase, prowapi.ProwJobSpec) {
+	for fullRepoName, ps := range conf.Presubmits {
+		org, repo, err := splitRepoName(fullRepoName)
+		if err != nil {
+			logrus.WithError(err).Warnf("Invalid repo name %s.", fullRepoName)
+			continue
+		}
+		for _, p := range ps {
+			if p.Name == o.jobName {
+				return p.JobBase, pjutil.PresubmitSpec(p, prowapi.Refs{
+					Org:     org,
+					Repo:    repo,
+					BaseRef: o.baseRef,
+					BaseSHA: o.baseSha,
+					Pulls: []prowapi.Pull{{
+						Author: o.pullAuthor,
+						Number: o.pullNumber,
+						SHA:    o.pullSha,
+					}},
+				})
+			}
+		}
+	}
+	for fullRepoName, ps := range conf.Postsubmits {
+		org, repo, err := splitRepoName(fullRepoName)
+		if err != nil {
+			logrus.WithError(err).Warnf("Invalid repo name %s.", fullRepoName)
+			continue
+		}
+		for _, p := range ps {
+			if p.Name == o.jobName {
+				return p.JobBase, pjutil.PostsubmitSpec(p, prowapi.Refs{
+					Org:     org,
+					Repo:    repo,
+					BaseRef: o.baseRef,
+					BaseSHA: o.baseSha,
+				})
+			}
+		}
+	}
+	for _, p := range conf.Periodics {
+		if p.Name == o.jobName {
+			return p.JobBase, pjutil.PeriodicSpec(p)
+		}
+	}
+	return config.JobBase{}, prowapi.ProwJobSpec{}
 }
 
 func (o *options) getPullRequest() (*github.PullRequest, error) {
@@ -143,9 +193,10 @@ func (o *options) Validate() error {
 }
 
 func gatherOptions() options {
-	o := options{}
+	var o options
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.StringVar(&o.jobName, "job", "", "Job to run.")
+	fs.BoolVar(&o.local, "local", false, "Print help for running locally")
 	fs.StringVar(&o.configPath, "config-path", "", "Path to config.yaml.")
 	fs.StringVar(&o.jobConfigPath, "job-config-path", "", "Path to prow job configs.")
 	fs.StringVar(&o.baseRef, "base-ref", "", "Git base ref under test")
@@ -161,107 +212,50 @@ func gatherOptions() options {
 func main() {
 	o := gatherOptions()
 	if err := o.Validate(); err != nil {
-		logrus.Fatalf("Invalid options: %v", err)
+		logrus.WithError(err).Fatalf("Bad flags")
 	}
 
 	conf, err := config.Load(o.configPath, o.jobConfigPath)
 	if err != nil {
-		logrus.WithError(err).Fatal("Error loading config.")
+		logrus.WithError(err).Fatal("Error loading config")
 	}
 
 	var secretAgent *secret.Agent
 	if o.github.TokenPath != "" {
 		secretAgent = &secret.Agent{}
 		if err := secretAgent.Start([]string{o.github.TokenPath}); err != nil {
-			logrus.Fatalf("Failed to start secret agent: %v", err)
+			logrus.WithError(err).Fatal("Failed to start secret agent")
 		}
 	}
 	o.githubClient, err = o.github.GitHubClient(secretAgent, false)
 	if err != nil {
-		logrus.Fatalf("failed to get GitHub client: %v", err)
+		logrus.WithError(err).Fatal("Failed to get GitHub client")
 	}
-
-	var pjs prowapi.ProwJobSpec
-	var labels map[string]string
-	var found bool
-	var needsBaseRef bool
-	var needsPR bool
-	for fullRepoName, ps := range conf.Presubmits {
-		org, repo, err := splitRepoName(fullRepoName)
-		if err != nil {
-			logrus.WithError(err).Warnf("Invalid repo name %s.", fullRepoName)
-			continue
-		}
-		for _, p := range ps {
-			if p.Name == o.jobName {
-				pjs = pjutil.PresubmitSpec(p, prowapi.Refs{
-					Org:     org,
-					Repo:    repo,
-					BaseRef: o.baseRef,
-					BaseSHA: o.baseSha,
-					Pulls: []prowapi.Pull{{
-						Author: o.pullAuthor,
-						Number: o.pullNumber,
-						SHA:    o.pullSha,
-					}},
-				})
-				labels = p.Labels
-				found = true
-				needsBaseRef = true
-				needsPR = true
-				o.org = org
-				o.repo = repo
-			}
-		}
-	}
-	for fullRepoName, ps := range conf.Postsubmits {
-		org, repo, err := splitRepoName(fullRepoName)
-		if err != nil {
-			logrus.WithError(err).Warnf("Invalid repo name %s.", fullRepoName)
-			continue
-		}
-		for _, p := range ps {
-			if p.Name == o.jobName {
-				pjs = pjutil.PostsubmitSpec(p, prowapi.Refs{
-					Org:     org,
-					Repo:    repo,
-					BaseRef: o.baseRef,
-					BaseSHA: o.baseSha,
-				})
-				labels = p.Labels
-				found = true
-				needsBaseRef = true
-				o.org = org
-				o.repo = repo
-			}
-		}
-	}
-	for _, p := range conf.Periodics {
-		if p.Name == o.jobName {
-			pjs = pjutil.PeriodicSpec(p)
-			labels = p.Labels
-			found = true
-		}
-	}
-	if !found {
+	job, pjs := o.genJobSpec(conf, o.jobName)
+	if job.Name == "" {
 		logrus.Fatalf("Job %s not found.", o.jobName)
 	}
-	if needsPR {
-		if err := o.defaultPR(&pjs); err != nil {
-			logrus.Fatalf("failed to default PR: %v", err)
+	if pjs.Refs != nil {
+		o.org = pjs.Refs.Org
+		o.repo = pjs.Refs.Repo
+		if len(pjs.Refs.Pulls) != 0 {
+			if err := o.defaultPR(&pjs); err != nil {
+				logrus.WithError(err).Fatal("Failed to default PR")
+			}
 		}
-	}
-	if needsBaseRef {
 		if err := o.defaultBaseRef(&pjs); err != nil {
-			logrus.Fatalf("failed to default base ref: %v", err)
+			logrus.WithError(err).Fatal("Failed to default base ref")
 		}
 	}
-	pj := pjutil.NewProwJob(pjs, labels)
+	pj := pjutil.NewProwJob(pjs, job.Labels, job.Annotations)
 	b, err := yaml.Marshal(&pj)
 	if err != nil {
 		logrus.WithError(err).Fatal("Error marshalling YAML.")
 	}
 	fmt.Print(string(b))
+	if o.local {
+		logrus.Info("Use 'bazel run //prow/cmd/phaino' to run this job locally in docker")
+	}
 }
 
 func splitRepoName(repo string) (string, string, error) {

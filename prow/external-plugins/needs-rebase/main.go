@@ -130,7 +130,7 @@ func main() {
 // then dispatches them to the appropriate plugins.
 type Server struct {
 	tokenGenerator func() []byte
-	ghc            *github.Client
+	ghc            github.Client
 	log            *logrus.Entry
 }
 
@@ -163,8 +163,18 @@ func (s *Server) handleEvent(eventType, eventGUID string, payload []byte) error 
 			return err
 		}
 		go func() {
-			if err := plugin.HandleEvent(l, s.ghc, &pre); err != nil {
-				l.Info("Error handling event.")
+			if err := plugin.HandlePullRequestEvent(l, s.ghc, &pre); err != nil {
+				l.WithField("event-type", eventType).WithError(err).Info("Error handling event.")
+			}
+		}()
+	case "issue_comment":
+		var ice github.IssueCommentEvent
+		if err := json.Unmarshal(payload, &ice); err != nil {
+			return err
+		}
+		go func() {
+			if err := plugin.HandleIssueCommentEvent(l, s.ghc, &ice); err != nil {
+				l.WithField("event-type", eventType).WithError(err).Info("Error handling event.")
 			}
 		}()
 	default:
@@ -173,7 +183,7 @@ func (s *Server) handleEvent(eventType, eventGUID string, payload []byte) error 
 	return nil
 }
 
-func periodicUpdate(log *logrus.Entry, pa *plugins.ConfigAgent, ghc *github.Client, period time.Duration) {
+func periodicUpdate(log *logrus.Entry, pa *plugins.ConfigAgent, ghc github.Client, period time.Duration) {
 	update := func() {
 		start := time.Now()
 		if err := plugin.HandleAll(log, ghc, pa.Config()); err != nil {

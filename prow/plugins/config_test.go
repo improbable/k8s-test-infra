@@ -20,6 +20,9 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/util/diff"
+	"sigs.k8s.io/yaml"
 )
 
 func TestValidateExternalPlugins(t *testing.T) {
@@ -177,7 +180,7 @@ func TestSetDefault_Maps(t *testing.T) {
 		}
 		for k, n := range tc.expected {
 			if an := actual[k]; !reflect.DeepEqual(an, n) {
-				t.Errorf("%s - %s: expected %s != actual %s", tc.name, k, n, an)
+				t.Errorf("%s - %s: unexpected value. Diff: %v", tc.name, k, diff.ObjectReflectDiff(an, n))
 			}
 		}
 	}
@@ -256,9 +259,9 @@ func TestSetCherryPickUnapprovedDefaults(t *testing.T) {
 	defaultBranchRegexp := `^release-.*$`
 	defaultComment := `This PR is not for the master branch but does not have the ` + "`cherry-pick-approved`" + `  label. Adding the ` + "`do-not-merge/cherry-pick-not-approved`" + `  label.
 
-To approve the cherry-pick, please assign the patch release manager for the release branch by writing ` + "`/assign @username`" + ` in a comment when ready.
+To approve the cherry-pick, please ping the *kubernetes/patch-release-team* in a comment when ready.
 
-The list of patch release managers for each release can be found [here](https://git.k8s.io/sig-release/release-managers.md).`
+See also [Kubernetes Patch Releases](https://github.com/kubernetes/sig-release/blob/master/releases/patch-releases.md)`
 
 	testcases := []struct {
 		name string
@@ -315,5 +318,283 @@ The list of patch release managers for each release can be found [here](https://
 		if c.CherryPickUnapproved.Comment != tc.expectedComment {
 			t.Errorf("unexpected comment: %s, expected: %s", c.CherryPickUnapproved.Comment, tc.expectedComment)
 		}
+	}
+}
+
+func TestOptionsForItem(t *testing.T) {
+	open := true
+	one, two := "v1", "v2"
+	var testCases = []struct {
+		name     string
+		item     string
+		config   map[string]BugzillaBranchOptions
+		expected BugzillaBranchOptions
+	}{
+		{
+			name:     "no config means no options",
+			item:     "item",
+			config:   map[string]BugzillaBranchOptions{},
+			expected: BugzillaBranchOptions{},
+		},
+		{
+			name:     "unrelated config means no options",
+			item:     "item",
+			config:   map[string]BugzillaBranchOptions{"other": {IsOpen: &open, TargetRelease: &one}},
+			expected: BugzillaBranchOptions{},
+		},
+		{
+			name:     "global config resolves to options",
+			item:     "item",
+			config:   map[string]BugzillaBranchOptions{"*": {IsOpen: &open, TargetRelease: &one}},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one},
+		},
+		{
+			name:     "specific config resolves to options",
+			item:     "item",
+			config:   map[string]BugzillaBranchOptions{"item": {IsOpen: &open, TargetRelease: &one}},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one},
+		},
+		{
+			name: "global and specific config resolves to options that favor specificity",
+			item: "item",
+			config: map[string]BugzillaBranchOptions{
+				"*":    {IsOpen: &open, TargetRelease: &one},
+				"item": {TargetRelease: &two},
+			},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &two},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual, expected := OptionsForItem(testCase.item, testCase.config), testCase.expected; !reflect.DeepEqual(actual, expected) {
+				t.Errorf("%s: got incorrect options for item %q: %v", testCase.name, testCase.item, diff.ObjectReflectDiff(actual, expected))
+			}
+		})
+	}
+}
+
+func TestResolveBugzillaOptions(t *testing.T) {
+	open, closed := true, false
+	yes, no := true, false
+	one, two := "v1", "v2"
+	modified, verified := []string{"VERIFIED"}, []string{"MODIFIED"}
+	post, pre := "POST", "PRE"
+	var testCases = []struct {
+		name          string
+		parent, child BugzillaBranchOptions
+		expected      BugzillaBranchOptions
+	}{
+		{
+			name: "no parent or child means no output",
+		},
+		{
+			name:     "no child means a copy of parent is the output",
+			parent:   BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &open, TargetRelease: &one, Statuses: &modified, DependentBugStatuses: &verified, StatusAfterValidation: &post},
+			expected: BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &open, TargetRelease: &one, Statuses: &modified, DependentBugStatuses: &verified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "no parent means a copy of child is the output",
+			child:    BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &open, TargetRelease: &one, Statuses: &modified, DependentBugStatuses: &verified, StatusAfterValidation: &post},
+			expected: BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &open, TargetRelease: &one, Statuses: &modified, DependentBugStatuses: &verified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "child overrides parent on IsOpen",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+			child:    BugzillaBranchOptions{IsOpen: &closed},
+			expected: BugzillaBranchOptions{IsOpen: &closed, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "child overrides parent on target release",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+			child:    BugzillaBranchOptions{TargetRelease: &two},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &two, Statuses: &modified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "child overrides parent on statuses",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+			child:    BugzillaBranchOptions{Statuses: &verified},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &verified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "child overrides parent on status after validation",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+			child:    BugzillaBranchOptions{StatusAfterValidation: &pre},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &pre},
+		},
+		{
+			name:     "child overrides parent on validation by default",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+			child:    BugzillaBranchOptions{ValidateByDefault: &yes},
+			expected: BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "child overrides parent on dependent bug statuses",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, DependentBugStatuses: &verified, StatusAfterValidation: &post},
+			child:    BugzillaBranchOptions{DependentBugStatuses: &modified},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, DependentBugStatuses: &modified, StatusAfterValidation: &post},
+		},
+		{
+			name:     "child overrides parent on status after mege",
+			parent:   BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post, StatusAfterMerge: &post},
+			child:    BugzillaBranchOptions{StatusAfterMerge: &pre},
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &one, Statuses: &modified, StatusAfterValidation: &post, StatusAfterMerge: &pre},
+		},
+		{
+			name:     "child overrides parent on all fields",
+			parent:   BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &open, TargetRelease: &one, Statuses: &verified, DependentBugStatuses: &verified, StatusAfterValidation: &post, StatusAfterMerge: &post},
+			child:    BugzillaBranchOptions{ValidateByDefault: &no, IsOpen: &closed, TargetRelease: &two, Statuses: &modified, DependentBugStatuses: &modified, StatusAfterValidation: &pre, StatusAfterMerge: &pre},
+			expected: BugzillaBranchOptions{ValidateByDefault: &no, IsOpen: &closed, TargetRelease: &two, Statuses: &modified, DependentBugStatuses: &modified, StatusAfterValidation: &pre, StatusAfterMerge: &pre},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual, expected := ResolveBugzillaOptions(testCase.parent, testCase.child), testCase.expected; !reflect.DeepEqual(actual, expected) {
+				t.Errorf("%s: resolved incorrect options for parent and child: %v", testCase.name, diff.ObjectReflectDiff(actual, expected))
+			}
+		})
+	}
+}
+
+func TestOptionsForBranch(t *testing.T) {
+	open, closed := true, false
+	yes, no := true, false
+	globalDefault, globalBranchDefault, orgDefault, orgBranchDefault, repoDefault, repoBranch := "global-default", "global-branch-default", "my-org-default", "my-org-branch-default", "my-repo-default", "my-repo-branch"
+	verified, modified := []string{"VERIFIED"}, []string{"MODIFIED"}
+	post, pre, release, notabug := "POST", "PRE", "RELEASE_PENDING", "NOTABUG"
+
+	rawConfig := `default:
+  "*":
+    target_release: global-default
+  "global-branch":
+    is_open: false
+    target_release: global-branch-default
+orgs:
+  my-org:
+    default:
+      "*":
+        is_open: true
+        target_release: my-org-default
+        status_after_validation: "PRE"
+      "my-org-branch":
+        target_release: my-org-branch-default
+        status_after_validation: "POST"
+    repos:
+      my-repo:
+        branches:
+          "*":
+            is_open: false
+            target_release: my-repo-default
+            statuses:
+            - VERIFIED
+            validate_by_default: false
+            status_after_merge: RELEASE_PENDING
+          "my-repo-branch":
+            target_release: my-repo-branch
+            statuses:
+            - MODIFIED
+            validate_by_default: true
+            status_after_merge: NOTABUG`
+	var config Bugzilla
+	if err := yaml.Unmarshal([]byte(rawConfig), &config); err != nil {
+		t.Fatalf("couldn't unmarshal config: %v", err)
+	}
+
+	var testCases = []struct {
+		name              string
+		org, repo, branch string
+		expected          BugzillaBranchOptions
+	}{
+		{
+			name:     "unconfigured branch gets global default",
+			org:      "some-org",
+			repo:     "some-repo",
+			branch:   "some-branch",
+			expected: BugzillaBranchOptions{TargetRelease: &globalDefault},
+		},
+		{
+			name:     "branch on unconfigured org/repo gets global default",
+			org:      "some-org",
+			repo:     "some-repo",
+			branch:   "global-branch",
+			expected: BugzillaBranchOptions{IsOpen: &closed, TargetRelease: &globalBranchDefault},
+		},
+		{
+			name:     "branch on configured org but not repo gets org default",
+			org:      "my-org",
+			repo:     "some-repo",
+			branch:   "some-branch",
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &orgDefault, StatusAfterValidation: &pre},
+		},
+		{
+			name:     "branch on configured org but not repo gets org branch default",
+			org:      "my-org",
+			repo:     "some-repo",
+			branch:   "my-org-branch",
+			expected: BugzillaBranchOptions{IsOpen: &open, TargetRelease: &orgBranchDefault, StatusAfterValidation: &post},
+		},
+		{
+			name:     "branch on configured org and repo gets repo default",
+			org:      "my-org",
+			repo:     "my-repo",
+			branch:   "some-branch",
+			expected: BugzillaBranchOptions{ValidateByDefault: &no, IsOpen: &closed, TargetRelease: &repoDefault, Statuses: &verified, StatusAfterValidation: &pre, StatusAfterMerge: &release},
+		},
+		{
+			name:     "branch on configured org and repo gets branch config",
+			org:      "my-org",
+			repo:     "my-repo",
+			branch:   "my-repo-branch",
+			expected: BugzillaBranchOptions{ValidateByDefault: &yes, IsOpen: &closed, TargetRelease: &repoBranch, Statuses: &modified, StatusAfterValidation: &pre, StatusAfterMerge: &notabug},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual, expected := config.OptionsForBranch(testCase.org, testCase.repo, testCase.branch), testCase.expected; !reflect.DeepEqual(actual, expected) {
+				t.Errorf("%s: resolved incorrect options for %s/%s#%s: %v", testCase.name, testCase.org, testCase.repo, testCase.branch, diff.ObjectReflectDiff(actual, expected))
+			}
+		})
+	}
+
+	var repoTestCases = []struct {
+		name      string
+		org, repo string
+		expected  map[string]BugzillaBranchOptions
+	}{
+		{
+			name: "unconfigured repo gets global default",
+			org:  "some-org",
+			repo: "some-repo",
+			expected: map[string]BugzillaBranchOptions{
+				"*":             {TargetRelease: &globalDefault},
+				"global-branch": {IsOpen: &closed, TargetRelease: &globalBranchDefault},
+			},
+		},
+		{
+			name: "repo in configured org gets org default",
+			org:  "my-org",
+			repo: "some-repo",
+			expected: map[string]BugzillaBranchOptions{
+				"*":             {IsOpen: &open, TargetRelease: &orgDefault, StatusAfterValidation: &pre},
+				"my-org-branch": {IsOpen: &open, TargetRelease: &orgBranchDefault, StatusAfterValidation: &post},
+			},
+		},
+		{
+			name: "configured repo gets repo config",
+			org:  "my-org",
+			repo: "my-repo",
+			expected: map[string]BugzillaBranchOptions{
+				"*":              {ValidateByDefault: &no, IsOpen: &closed, TargetRelease: &repoDefault, Statuses: &verified, StatusAfterValidation: &pre, StatusAfterMerge: &release},
+				"my-repo-branch": {ValidateByDefault: &yes, IsOpen: &closed, TargetRelease: &repoBranch, Statuses: &modified, StatusAfterValidation: &pre, StatusAfterMerge: &notabug},
+				"my-org-branch":  {ValidateByDefault: &no, IsOpen: &closed, TargetRelease: &repoDefault, Statuses: &verified, StatusAfterValidation: &post, StatusAfterMerge: &release},
+			},
+		},
+	}
+	for _, testCase := range repoTestCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if actual, expected := config.OptionsForRepo(testCase.org, testCase.repo), testCase.expected; !reflect.DeepEqual(actual, expected) {
+				t.Errorf("%s: resolved incorrect options for %s/%s: %v", testCase.name, testCase.org, testCase.repo, diff.ObjectReflectDiff(actual, expected))
+			}
+		})
 	}
 }

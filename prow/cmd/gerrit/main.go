@@ -77,7 +77,7 @@ func gatherOptions() options {
 }
 
 func main() {
-	logrus.SetFormatter(logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "gerrit"}))
+	logrusutil.ComponentInit("gerrit")
 
 	pjutil.ServePProf()
 
@@ -105,7 +105,7 @@ func main() {
 	logrus.Infof("Starting gerrit fetcher")
 
 	// TODO(fejta): refactor as timer, which we reset to the current TickInterval value each time
-	tick := time.Tick(cfg().Gerrit.TickInterval)
+	tick := time.Tick(cfg().Gerrit.TickInterval.Duration)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 

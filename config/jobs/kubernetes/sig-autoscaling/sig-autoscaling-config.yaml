@@ -7,7 +7,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       args:
       - --repo=k8s.io/autoscaler=master
       - --root=/go/src
@@ -27,6 +27,9 @@ periodics:
       securityContext:
         privileged: true
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-vpa
+    testgrid-tab-name: autoscaling-vpa-actuation
 - name: ci-kubernetes-e2e-autoscaling-vpa-admission-controller
   interval: 2h
   labels:
@@ -35,7 +38,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       args:
       - --repo=k8s.io/autoscaler=master
       - --root=/go/src
@@ -55,6 +58,9 @@ periodics:
       securityContext:
         privileged: true
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-vpa
+    testgrid-tab-name: autoscaling-vpa-admission-controller
 - name: ci-kubernetes-e2e-autoscaling-vpa-full
   interval: 2h
   labels:
@@ -63,11 +69,11 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       args:
       - --repo=k8s.io/autoscaler=master
       - --root=/go/src
-      - --timeout=80
+      - --timeout=100
       - --scenario=kubernetes_e2e
       - --
       - --check-leaked-resources
@@ -78,11 +84,14 @@ periodics:
       - --test=false
       - --test-cmd=../vertical-pod-autoscaler/hack/run-e2e.sh
       - --test-cmd-args=full-vpa
-      - --timeout=60m
+      - --timeout=80m
       # docker-in-docker needs privileged mode
       securityContext:
         privileged: true
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-vpa
+    testgrid-tab-name: autoscaling-vpa-full
 - name: ci-kubernetes-e2e-autoscaling-vpa-recommender
   interval: 3h
   labels:
@@ -91,7 +100,7 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       args:
       - --repo=k8s.io/autoscaler=master
       - --root=/go/src
@@ -111,6 +120,9 @@ periodics:
       securityContext:
         privileged: true
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-vpa
+    testgrid-tab-name: autoscaling-vpa-recommender
 - name: ci-kubernetes-e2e-autoscaling-vpa-updater
   interval: 2h
   labels:
@@ -119,11 +131,11 @@ periodics:
     preset-dind-enabled: "true"
   spec:
     containers:
-    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+    - image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
       args:
       - --repo=k8s.io/autoscaler=master
       - --root=/go/src
-      - --timeout=80
+      - --timeout=100
       - --scenario=kubernetes_e2e
       - --
       - --check-leaked-resources
@@ -134,11 +146,14 @@ periodics:
       - --test=false
       - --test-cmd=../vertical-pod-autoscaler/hack/run-e2e.sh
       - --test-cmd-args=updater
-      - --timeout=60m
+      - --timeout=80m
       # docker-in-docker needs privileged mode
       securityContext:
         privileged: true
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-vpa
+    testgrid-tab-name: autoscaling-vpa-updater
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gce-autoscaling
   labels:
@@ -169,8 +184,11 @@ periodics:
       - --runtime-config=scheduling.k8s.io/v1alpha1=true
       - --test_args=--ginkgo.focus=\[Feature:ClusterSizeAutoscalingScaleUp\]|\[Feature:ClusterSizeAutoscalingScaleDown\]|\[Feature:InitialResources\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=300m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-cluster-autoscaler
+    testgrid-tab-name: gci-gce-autoscaling
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gce-autoscaling-hpa
   labels:
@@ -191,8 +209,11 @@ periodics:
       - --provider=gce
       - --test_args=--ginkgo.focus=\[Feature:CustomMetricsAutoscaling\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=300m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-hpa
+    testgrid-tab-name: gci-gce-autoscaling-hpa
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gce-autoscaling-migs
   labels:
@@ -223,8 +244,11 @@ periodics:
       - --runtime-config=scheduling.k8s.io/v1alpha1=true
       - --test_args=--ginkgo.focus=\[Feature:ClusterSizeAutoscalingScaleUp\]|\[Feature:ClusterSizeAutoscalingScaleDown\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=300m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-cluster-autoscaler
+    testgrid-tab-name: gci-gce-autoscaling-migs
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gce-autoscaling-migs-hpa
   labels:
@@ -245,8 +269,11 @@ periodics:
       - --provider=gce
       - --test_args=--ginkgo.focus=\[Feature:CustomMetricsAutoscaling\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=300m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-hpa
+    testgrid-tab-name: gci-gce-autoscaling-migs-hpa
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gke-autoscaling
   labels:
@@ -262,7 +289,7 @@ periodics:
       - --check-leaked-resources
       - --cluster=ca
       - --deployment=gke
-      - --extract=ci/latest
+      - --extract=ci-cross/latest
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/ci/staging
       - --gcp-node-image=gci
       - --gcp-project=k8s-e2e-gci-gke-autoscaling
@@ -271,8 +298,11 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.focus=\[Feature:ClusterSizeAutoscalingScaleUp\]|\[Feature:ClusterSizeAutoscalingScaleDown\]|\[Feature:ClusterSizeAutoscalingScaleWithNAP\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=600m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-cluster-autoscaler
+    testgrid-tab-name: gci-gke-autoscaling
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gke-autoscaling-hpa
   labels:
@@ -288,7 +318,7 @@ periodics:
       - --check-leaked-resources
       - --cluster=hpa
       - --deployment=gke
-      - --extract=ci/latest
+      - --extract=ci-cross/latest
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/ci/staging
       - --gcp-node-image=gci
       - --gcp-project=k8s-e2e-gci-gke-autoscaling
@@ -297,8 +327,11 @@ periodics:
       - --provider=gke
       - --test_args=--ginkgo.focus=\[Feature:CustomMetricsAutoscaling\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=420m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
 
+  annotations:
+    testgrid-dashboards: sig-autoscaling-hpa
+    testgrid-tab-name: gci-gke-autoscaling-hpa
 - interval: 30m
   name: ci-kubernetes-e2e-gci-gke-autoscaling-regional
   labels:
@@ -313,7 +346,7 @@ periodics:
       - --
       - --check-leaked-resources
       - --deployment=gke
-      - --extract=ci/latest
+      - --extract=ci-cross/latest
       - --gcp-cloud-sdk=gs://cloud-sdk-testing/ci/staging
       - --gcp-node-image=gci
       - --gcp-project=k8s-jkns-gci-autoscaling-regio
@@ -324,4 +357,7 @@ periodics:
       - --provider=gke
       - --test_args=--gce-multizone=true --ginkgo.focus=\[Feature:ClusterSizeAutoscalingScaleUp\]|\[Feature:ClusterSizeAutoscalingScaleDown\] --ginkgo.skip=\[Flaky\] --minStartupPods=8
       - --timeout=400m
-      image: gcr.io/k8s-testimages/kubekins-e2e:v20190315-49d62eb51-master
+      image: gcr.io/k8s-testimages/kubekins-e2e:v20190806-012cf5f-master
+  annotations:
+    testgrid-dashboards: sig-autoscaling-cluster-autoscaler
+    testgrid-tab-name: gci-gke-autoscaling-regional

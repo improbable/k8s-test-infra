@@ -19,6 +19,7 @@ package gcsupload
 import (
 	"context"
 	"fmt"
+	"mime"
 	"os"
 	"path"
 	"path/filepath"
@@ -39,11 +40,21 @@ import (
 // to their destination in GCS, so the caller can
 // operate relative to the base of the GCS dir.
 func (o Options) Run(spec *downwardapi.JobSpec, extra map[string]gcs.UploadFunc) error {
+	for extension, mediaType := range o.GCSConfiguration.MediaTypes {
+		mime.AddExtensionType("."+extension, mediaType)
+	}
+
 	uploadTargets := o.assembleTargets(spec, extra)
 
-	if !o.DryRun {
-		ctx := context.Background()
-		gcsClient, err := storage.NewClient(ctx, option.WithCredentialsFile(o.GcsCredentialsFile))
+	if o.DryRun {
+		for destination := range uploadTargets {
+			logrus.WithField("dest", destination).Info("Would upload")
+		}
+		return nil
+	}
+
+	if o.LocalOutputDir == "" {
+		gcsClient, err := storage.NewClient(context.Background(), option.WithCredentialsFile(o.GcsCredentialsFile))
 		if err != nil {
 			return fmt.Errorf("could not connect to GCS: %v", err)
 		}
@@ -51,13 +62,13 @@ func (o Options) Run(spec *downwardapi.JobSpec, extra map[string]gcs.UploadFunc)
 		if err := gcs.Upload(gcsClient.Bucket(o.Bucket), uploadTargets); err != nil {
 			return fmt.Errorf("failed to upload to GCS: %v", err)
 		}
+		logrus.Info("Finished upload to GCS")
 	} else {
-		for destination := range uploadTargets {
-			logrus.WithField("dest", destination).Info("Would upload")
+		if err := gcs.LocalExport(o.LocalOutputDir, uploadTargets); err != nil {
+			return fmt.Errorf("failed to copy files to %q: %v", o.LocalOutputDir, err)
 		}
+		logrus.Infof("Finished copying files to %q.", o.LocalOutputDir)
 	}
-
-	logrus.Info("Finished upload to GCS")
 	return nil
 }
 
@@ -66,19 +77,28 @@ func (o Options) assembleTargets(spec *downwardapi.JobSpec, extra map[string]gcs
 
 	uploadTargets := map[string]gcs.UploadFunc{}
 
-	// ensure that an alias exists for any
-	// job we're uploading artifacts for
-	if alias := gcs.AliasForSpec(spec); alias != "" {
-		fullBasePath := "gs://" + path.Join(o.Bucket, jobBasePath)
-		uploadTargets[alias] = gcs.DataUploadWithMetadata(strings.NewReader(fullBasePath), map[string]string{
-			"x-goog-meta-link": fullBasePath,
-		})
-	}
-
-	if latestBuilds := gcs.LatestBuildForSpec(spec, builder); len(latestBuilds) > 0 {
-		for _, latestBuild := range latestBuilds {
-			uploadTargets[latestBuild] = gcs.DataUpload(strings.NewReader(spec.BuildID))
+	// Skip the alias and latest build files in local mode.
+	if o.LocalOutputDir == "" {
+		// ensure that an alias exists for any
+		// job we're uploading artifacts for
+		if alias := gcs.AliasForSpec(spec); alias != "" {
+			fullBasePath := "gs://" + path.Join(o.Bucket, jobBasePath)
+			uploadTargets[alias] = gcs.DataUploadWithMetadata(strings.NewReader(fullBasePath), map[string]string{
+				"x-goog-meta-link": fullBasePath,
+			})
 		}
+
+		if latestBuilds := gcs.LatestBuildForSpec(spec, builder); len(latestBuilds) > 0 {
+			for _, latestBuild := range latestBuilds {
+				dir, filename := path.Split(latestBuild)
+				metadataFromFileName, attrs := gcs.AttributesFromFileName(filename)
+				uploadTargets[path.Join(dir, metadataFromFileName)] = gcs.DataUploadWithAttributes(strings.NewReader(spec.BuildID), attrs)
+			}
+		}
+	} else {
+		// Remove the gcs path prefix in local mode so that items are rooted in the output dir without
+		// excessive directory nesting.
+		gcsPath = ""
 	}
 
 	for _, item := range o.Items {
@@ -90,12 +110,13 @@ func (o Options) assembleTargets(spec *downwardapi.JobSpec, extra map[string]gcs
 		if info.IsDir() {
 			gatherArtifacts(item, gcsPath, info.Name(), uploadTargets)
 		} else {
-			destination := path.Join(gcsPath, info.Name())
+			metadataFromFileName, attrs := gcs.AttributesFromFileName(info.Name())
+			destination := path.Join(gcsPath, metadataFromFileName)
 			if _, exists := uploadTargets[destination]; exists {
 				logrus.Warnf("Encountered duplicate upload of %s, skipping...", destination)
 				continue
 			}
-			uploadTargets[destination] = gcs.FileUpload(item)
+			uploadTargets[destination] = gcs.FileUploadWithAttributes(item, attrs)
 		}
 	}
 
@@ -153,13 +174,15 @@ func gatherArtifacts(artifactDir, gcsPath, subDir string, uploadTargets map[stri
 		// this error as we can be certain it won't occur and best-
 		// effort upload is OK in any case
 		if relPath, err := filepath.Rel(artifactDir, fspath); err == nil {
-			destination := path.Join(gcsPath, subDir, relPath)
+			dir, filename := path.Split(path.Join(gcsPath, subDir, relPath))
+			metadataFromFileName, attrs := gcs.AttributesFromFileName(filename)
+			destination := path.Join(dir, metadataFromFileName)
 			if _, exists := uploadTargets[destination]; exists {
 				logrus.Warnf("Encountered duplicate upload of %s, skipping...", destination)
 				return nil
 			}
 			logrus.Printf("Found %s in artifact directory. Uploading as %s\n", fspath, destination)
-			uploadTargets[destination] = gcs.FileUpload(fspath)
+			uploadTargets[destination] = gcs.FileUploadWithAttributes(fspath, attrs)
 		} else {
 			logrus.Warnf("Encountered error in relative path calculation for %s under %s: %v", fspath, artifactDir, err)
 		}

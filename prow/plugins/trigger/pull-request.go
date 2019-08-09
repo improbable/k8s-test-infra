@@ -21,13 +21,19 @@ import (
 	"fmt"
 	"net/url"
 
+	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/errorutil"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/labels"
+	"k8s.io/test-infra/prow/pjutil"
 	"k8s.io/test-infra/prow/plugins"
 )
 
 func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) error {
+	if len(c.Config.Presubmits[pr.PullRequest.Base.Repo.FullName]) == 0 {
+		return nil
+	}
+
 	org, repo, a := orgRepoAuthor(pr.PullRequest)
 	author := string(a)
 	num := pr.PullRequest.Number
@@ -36,7 +42,7 @@ func handlePR(c Client, trigger plugins.Trigger, pr github.PullRequestEvent) err
 		// When a PR is opened, if the author is in the org then build it.
 		// Otherwise, ask for "/ok-to-test". There's no need to look for previous
 		// "/ok-to-test" comments since the PR was just opened!
-		member, err := TrustedUser(c.GitHubClient, trigger, author, org, repo)
+		member, err := TrustedUser(c.GitHubClient, trigger.OnlyOrgMembers, trigger.TrustedOrg, author, org, repo)
 		if err != nil {
 			return fmt.Errorf("could not check membership: %s", err)
 		}
@@ -200,7 +206,7 @@ I understand the commands that are listed [here](https://go.k8s.io/bot-commands?
 // It first checks if the author is in the org, then looks for "ok-to-test" label.
 func TrustedPullRequest(ghc githubClient, trigger plugins.Trigger, author, org, repo string, num int, l []github.Label) ([]github.Label, bool, error) {
 	// First check if the author is a member of the org.
-	if orgMember, err := TrustedUser(ghc, trigger, author, org, repo); err != nil {
+	if orgMember, err := TrustedUser(ghc, trigger.OnlyOrgMembers, trigger.TrustedOrg, author, org, repo); err != nil {
 		return l, false, fmt.Errorf("error checking %s for trust: %v", author, err)
 	} else if orgMember {
 		return l, true, nil
@@ -218,9 +224,11 @@ func TrustedPullRequest(ghc githubClient, trigger plugins.Trigger, author, org, 
 
 // buildAll ensures that all builds that should run and will be required are built
 func buildAll(c Client, pr *github.PullRequest, eventGUID string, elideSkippedContexts bool) error {
-	toTest, toSkip, err := filterPresubmits(testAllFilter(), c.GitHubClient, pr, c.Config.Presubmits[pr.Base.Repo.FullName], c.Logger)
+	org, repo, number, branch := pr.Base.Repo.Owner.Login, pr.Base.Repo.Name, pr.Number, pr.Base.Ref
+	changes := config.NewGitHubDeferredChangedFilesProvider(c.GitHubClient, org, repo, number)
+	toTest, toSkip, err := pjutil.FilterPresubmits(pjutil.TestAllFilter(), changes, branch, c.Config.Presubmits[pr.Base.Repo.FullName], c.Logger)
 	if err != nil {
 		return err
 	}
-	return runAndSkipJobs(c, pr, toTest, toSkip, eventGUID, elideSkippedContexts)
+	return RunAndSkipJobs(c, pr, toTest, toSkip, eventGUID, elideSkippedContexts)
 }

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: extensions/v1beta1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   namespace: default
@@ -23,6 +23,9 @@ spec:
   replicas: 1 # Do not scale up.
   strategy:
     type: Recreate
+  selector:
+    matchLabels:
+      app: tide
   template:
     metadata:
       labels:
@@ -31,14 +34,16 @@ spec:
       # serviceAccountName: "tide" # Uncomment for use with RBAC
       containers:
       - name: tide
-        image: gcr.io/k8s-prow/tide:v20190314-e8134a3
+        image: gcr.io/k8s-prow/tide:v20190808-5e69697af
         args:
         - --dry-run=false
         - --github-endpoint=http://ghproxy
         - --github-endpoint=https://api.github.com
+        - --config-path=/etc/config/config.yaml
         - --job-config-path=/etc/job-config
         - --gcs-credentials-file=/etc/service-account/service-account.json
         - --history-uri=gs://k8s-prow/tide-history.json
+        - --status-path=gs://k8s-prow/tide-status-checkpoint.yaml
         ports:
           - name: http
             containerPort: 8888

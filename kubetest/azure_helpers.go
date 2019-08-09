@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	resources "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-05-01/resources"
@@ -44,6 +45,7 @@ type Properties struct {
 	WindowsProfile          *WindowsProfile          `json:"windowsProfile,omitempty"`
 	ServicePrincipalProfile *ServicePrincipalProfile `json:"servicePrincipalProfile,omitempty"`
 	ExtensionProfiles       []map[string]string      `json:"extensionProfiles,omitempty"`
+	CustomCloudProfile      *CustomCloudProfile      `json:"customCloudProfile,omitempty"`
 }
 
 type ServicePrincipalProfile struct {
@@ -109,6 +111,7 @@ type KubernetesConfig struct {
 	CloudProviderRateLimitQPS    float64           `json:"cloudProviderRateLimitQPS,omitempty"`
 	CloudProviderRateLimitBucket int               `json:"cloudProviderRateLimitBucket,omitempty"`
 	APIServerConfig              map[string]string `json:"apiServerConfig,omitempty"`
+	KubernetesImageBase          string            `json:"kubernetesImageBase,omitempty"`
 }
 type OrchestratorProfile struct {
 	OrchestratorType    string            `json:"orchestratorType"`
@@ -127,16 +130,17 @@ type MasterProfile struct {
 }
 
 type AgentPoolProfile struct {
-	Name                  string              `json:"name"`
-	Count                 int                 `json:"count"`
-	Distro                string              `json:"distro"`
-	VMSize                string              `json:"vmSize"`
-	OSType                string              `json:"osType,omitempty"`
-	AvailabilityProfile   string              `json:"availabilityProfile"`
-	IPAddressCount        int                 `json:"ipAddressCount,omitempty"`
-	PreProvisionExtension map[string]string   `json:"preProvisionExtension,omitempty"`
-	Extensions            []map[string]string `json:"extensions,omitempty"`
-	OSDiskSizeGB          int                 `json:"osDiskSizeGB,omitempty" validate:"min=0,max=1023"`
+	Name                   string              `json:"name"`
+	Count                  int                 `json:"count"`
+	Distro                 string              `json:"distro"`
+	VMSize                 string              `json:"vmSize"`
+	OSType                 string              `json:"osType,omitempty"`
+	AvailabilityProfile    string              `json:"availabilityProfile"`
+	IPAddressCount         int                 `json:"ipAddressCount,omitempty"`
+	PreProvisionExtension  map[string]string   `json:"preProvisionExtension,omitempty"`
+	Extensions             []map[string]string `json:"extensions,omitempty"`
+	OSDiskSizeGB           int                 `json:"osDiskSizeGB,omitempty" validate:"min=0,max=1023"`
+	EnableVMSSNodePublicIP bool                `json:"enableVMSSNodePublicIP,omitempty"`
 }
 
 type AzureClient struct {
@@ -144,6 +148,25 @@ type AzureClient struct {
 	subscriptionID    string
 	deploymentsClient resources.DeploymentsClient
 	groupsClient      resources.GroupsClient
+}
+
+// CustomCloudProfile defines configuration for custom cloud profile( for ex: Azure Stack)
+type CustomCloudProfile struct {
+	PortalURL string `json:"portalURL,omitempty"`
+}
+
+// AzureStackMetadataEndpoints defines configuration for Azure Stack
+type AzureStackMetadataEndpoints struct {
+	GalleryEndpoint string                            `json:"galleryEndpoint,omitempty"`
+	GraphEndpoint   string                            `json:"graphEndpoint,omitempty"`
+	PortalEndpoint  string                            `json:"portalEndpoint,omitempty"`
+	Authentication  *AzureStackMetadataAuthentication `json:"authentication,omitempty"`
+}
+
+// AzureStackMetadataAuthentication defines configuration for Azure Stack
+type AzureStackMetadataAuthentication struct {
+	LoginEndpoint string   `json:"loginEndpoint,omitempty"`
+	Audiences     []string `json:"audiences,omitempty"`
 }
 
 func (az *AzureClient) ValidateDeployment(ctx context.Context, resourceGroupName, deploymentName string, template, params *map[string]interface{}) (valid resources.DeploymentValidateResult, err error) {
@@ -175,7 +198,7 @@ func (az *AzureClient) DeployTemplate(ctx context.Context, resourceGroupName, de
 		return de, fmt.Errorf("cannot create deployment: %v", err)
 	}
 
-	err = future.WaitForCompletion(ctx, az.deploymentsClient.Client)
+	err = future.WaitForCompletionRef(ctx, az.deploymentsClient.Client)
 	if err != nil {
 		return de, fmt.Errorf("cannot get the create deployment future response: %v", err)
 	}
@@ -210,9 +233,11 @@ func (az *AzureClient) DeleteResourceGroup(ctx context.Context, groupName string
 		if err != nil {
 			return fmt.Errorf("cannot delete resource group %v: %v", groupName, err)
 		}
-		err = future.WaitForCompletion(ctx, az.groupsClient.Client)
+		err = future.WaitForCompletionRef(ctx, az.groupsClient.Client)
 		if err != nil {
-			return fmt.Errorf("cannot get the delete resource group future response: %v", err)
+			// Skip the teardown errors because of https://github.com/Azure/go-autorest/issues/357
+			// TODO(feiskyer): fix the issue by upgrading go-autorest version >= v11.3.2.
+			log.Printf("Warning: failed to delete resource group %q with error %v", groupName, err)
 		}
 	}
 	return nil

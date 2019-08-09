@@ -17,8 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,14 +34,16 @@ import (
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/pjutil"
 
-	buildset "github.com/knative/build/pkg/client/clientset/versioned"
-	buildinfo "github.com/knative/build/pkg/client/informers/externalversions"
-	buildinfov1alpha1 "github.com/knative/build/pkg/client/informers/externalversions/build/v1alpha1"
+	buildv1alpha1 "github.com/knative/build/pkg/apis/build/v1alpha1"
 	"github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp" // support gcp users in .kube/config
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 type options struct {
@@ -49,10 +53,10 @@ type options struct {
 	kubeconfig   string
 	totURL       string
 
-	// Create these values by following:
-	//   https://github.com/kelseyhightower/grafeas-tutorial/blob/master/pki/gen-certs.sh
-	cert       string
-	privateKey string
+	// This is a termporary flag which gates the usage of plank.allow_cancellations config value
+	// for build aborter.
+	// TODO remove this flag and use directly the config flag.
+	useAllowCancellations bool
 }
 
 func parseOptions() options {
@@ -69,11 +73,9 @@ func (o *options) parse(flags *flag.FlagSet, args []string) error {
 	flags.StringVar(&o.kubeconfig, "kubeconfig", "", "Path to kubeconfig. Only required if out of cluster")
 	flags.StringVar(&o.config, "config", "", "Path to prow config.yaml")
 	flags.StringVar(&o.buildCluster, "build-cluster", "", "Path to file containing a YAML-marshalled kube.Cluster object. If empty, uses the local cluster.")
-	flags.StringVar(&o.cert, "tls-cert-file", "", "Path to x509 certificate for HTTPS")
-	flags.StringVar(&o.privateKey, "tls-private-key-file", "", "Path to matching x509 private key.")
-	flags.Parse(args)
-	if (len(o.cert) == 0) != (len(o.privateKey) == 0) {
-		return errors.New("Both --tls-cert-file and --tls-private-key-file are required for HTTPS")
+	flags.BoolVar(&o.useAllowCancellations, "use-allow-cancellations", false, "Gates the usage of plank.allow_cancellations config flag for build aborter")
+	if err := flags.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %v", err)
 	}
 	if o.kubeconfig != "" && o.buildCluster != "" {
 		return errors.New("deprecated --build-cluster may not be used with --kubeconfig")
@@ -102,38 +104,53 @@ func stopper() chan struct{} {
 }
 
 type buildConfig struct {
-	client   buildset.Interface
-	informer buildinfov1alpha1.BuildInformer
+	client ctrlruntimeclient.Client
+	// Only use the informer to add EventHandlers, for getting
+	// objects use the client instead, its Reader interface is
+	// backed by the cache
+	informer cache.Informer
 }
 
 // newBuildConfig returns a client and informer capable of mutating and monitoring the specified config.
 func newBuildConfig(cfg rest.Config, stop chan struct{}) (*buildConfig, error) {
-	bc, err := buildset.NewForConfig(&cfg)
+	// Assume watches receive updates, but resync every 30m in case something wonky happens
+	resyncInterval := 30 * time.Minute
+	// We construct a manager because it has a client whose Reader interface is backed by its cache, which
+	// is really nice to use, but the corresponding code is not exported.
+	mgr, err := manager.New(&cfg, manager.Options{SyncPeriod: &resyncInterval, MetricsBindAddress: "0"})
 	if err != nil {
 		return nil, err
 	}
 
 	// Ensure the knative-build CRD is deployed
 	// TODO(fejta): probably a better way to do this
-	_, err = bc.Build().Builds("").List(metav1.ListOptions{Limit: 1})
-	if err != nil {
+	buildList := &buildv1alpha1.BuildList{}
+	opts := &ctrlruntimeclient.ListOptions{Raw: &metav1.ListOptions{Limit: 1}}
+	if err := mgr.GetClient().List(context.TODO(), buildList, ctrlruntimeclient.UseListOptions(opts)); err != nil {
 		return nil, err
 	}
-	// Assume watches receive updates, but resync every 30m in case something wonky happens
-	bif := buildinfo.NewSharedInformerFactory(bc, 30*time.Minute)
-	bif.Build().V1alpha1().Builds().Lister()
-	go bif.Start(stop)
+	cache := mgr.GetCache()
+	informer, err := cache.GetInformer(&buildv1alpha1.Build{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cache for buildv1alpha1.Build: %v", err)
+	}
+	go cache.Start(stop)
 	return &buildConfig{
-		client:   bc,
-		informer: bif.Build().V1alpha1().Builds(),
+		client:   mgr.GetClient(),
+		informer: informer,
 	}, nil
 }
 
 func main() {
+	logrusutil.ComponentInit("build")
+
 	o := parseOptions()
-	logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "build"})
 
 	pjutil.ServePProf()
+
+	if err := buildv1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		logrus.WithError(err).Fatal("failed to add buildv1alpha1 to scheme")
+	}
 
 	configAgent := &config.Agent{}
 	if o.config != "" {
@@ -148,14 +165,16 @@ func main() {
 		logrus.WithError(err).Fatal("Error building client configs")
 	}
 
-	if !o.allContexts { // Just the default context please
-		logrus.Warn("Truncating to local and default contexts")
+	local := configs[kube.InClusterContext]
+	if !o.allContexts {
+		logrus.Warn("Truncating to default context")
 		configs = map[string]rest.Config{
-			kube.InClusterContext:    configs[kube.InClusterContext],
 			kube.DefaultClusterAlias: configs[kube.DefaultClusterAlias],
 		}
+	} else {
+		// the InClusterContext is always mapped to DefaultClusterAlias in the controller, so there is no need to watch for this config.
+		delete(configs, kube.InClusterContext)
 	}
-	local := configs[kube.InClusterContext]
 
 	stop := stopper()
 
@@ -175,7 +194,7 @@ func main() {
 	for context, cfg := range configs {
 		var bc *buildConfig
 		bc, err = newBuildConfig(cfg, stop)
-		if apierrors.IsNotFound(err) {
+		if apimeta.IsNoMatchError(err) {
 			logrus.WithError(err).Warnf("Ignoring %s: knative build CRD not deployed", context)
 			continue
 		}
@@ -185,12 +204,20 @@ func main() {
 		buildConfigs[context] = *bc
 	}
 
-	// TODO(fejta): move to its own binary
-	if len(o.cert) > 0 {
-		go runServer(o.cert, o.privateKey)
+	opts := controllerOptions{
+		kc:                    kc,
+		pjc:                   pjc,
+		pji:                   pjif.Prow().V1().ProwJobs(),
+		buildConfigs:          buildConfigs,
+		totURL:                o.totURL,
+		prowConfig:            configAgent.Config,
+		rl:                    kube.RateLimiter(controllerName),
+		useAllowCancellations: o.useAllowCancellations,
 	}
-
-	controller := newController(kc, pjc, pjif.Prow().V1().ProwJobs(), buildConfigs, o.totURL, configAgent.Config, kube.RateLimiter(controllerName))
+	controller, err := newController(opts)
+	if err != nil {
+		logrus.WithError(err).Fatal("Error creating controller")
+	}
 	if err := controller.Run(2, stop); err != nil {
 		logrus.WithError(err).Fatal("Error running controller")
 	}

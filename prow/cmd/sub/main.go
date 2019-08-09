@@ -27,17 +27,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
-	prowv1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
+	prowv1 "k8s.io/test-infra/prow/client/clientset/versioned/typed/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
 	"k8s.io/test-infra/prow/config/secret"
 	"k8s.io/test-infra/prow/flagutil"
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/metrics"
+	"k8s.io/test-infra/prow/pubsub/reporter"
 	"k8s.io/test-infra/prow/pubsub/subscriber"
 )
 
@@ -89,8 +89,7 @@ func init() {
 }
 
 func main() {
-
-	logrus.SetFormatter(logrusutil.NewDefaultFieldsFormatter(nil, logrus.Fields{"component": "pubsub-subscriber"}))
+	logrusutil.ComponentInit("pubsub-subscriber")
 
 	configAgent := &config.Agent{}
 	if err := configAgent.Start(flagOptions.configPath, flagOptions.jobConfigPath); err != nil {
@@ -120,21 +119,18 @@ func main() {
 
 	promMetrics := subscriber.NewMetrics()
 
-	// Push metrics to the configured prometheus pushgateway endpoint.
-	pushGateway := configAgent.Config().PushGateway
-	if pushGateway.Endpoint != "" {
-		go metrics.PushMetrics("sub", pushGateway.Endpoint, pushGateway.Interval)
-	}
+	// Expose prometheus metrics
+	metrics.ExposeMetrics("sub", configAgent.Config().PushGateway)
 
 	s := &subscriber.Subscriber{
 		ConfigAgent:   configAgent,
 		Metrics:       promMetrics,
 		ProwJobClient: kubeClient,
+		Reporter:      reporter.NewReporter(configAgent.Config),
 	}
 
 	// Return 200 on / for health checks.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {})
-	http.Handle("/metrics", promhttp.Handler())
 
 	// Will call shutdown which will stop the errGroup
 	shutdownCtx, shutdown := context.WithCancel(context.Background())

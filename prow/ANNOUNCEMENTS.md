@@ -1,14 +1,31 @@
 # Announcements
 
 New features added to each component:
+ - *July 30, 2019* `authorized_users` in `rerun_auth_config` for deck will become `github_users`. 
+ - *July 19, 2019* deck will soon remove its default value for `--cookie-secret-file`.
+   If you set `--oauth-url` but not `--cookie-secret-file`, add
+   `--cookie-secret-file=/etc/cookie-secret` to your deck instance. The default value
+   will be removed at the end of October 2019.
+ - *July 2, 2019* prow defaults to report status for both presubmit and postsubmit
+   jobs on GitHub now.
+ - *June 17, 2019* It is now possible to configure the channel for the Slack reporter
+   directly on jobs via the `.reporter_config.slack.channel` config option
+ - *May 13, 2019* New `plank` config `pod_running_timeout` is added and
+   defaulted to two days to allow plank abort pods stuck in running state.
+ - *April 25, 2019* `--job-config` in `peribolos` has never been used; it is
+   deprecated and will be removed in July 2019. Remove the flag from any calls
+   to the tool.
+ - *April 24, 2019* `file_weight_count` in blunderbuss is being deprecated in
+   favour of the more current `max_request_count` functionality. Please ensure
+   your configuration is up to date before the end of May 2019.
  - *March 12, 2019* tide now records a history of its actions and exposes a
    filterable view of these actions at the `/tide-history` deck path.
  - *March 9, 2019* prow components now support reading gzipped config files
  - *February 13, 2019* prow (both plank and crier) can set status on the commit
-   for postsubmit jobs on github now! 
+   for postsubmit jobs on github now!
    Type of jobs can be reported to github is gated by a config field like
    ```yaml
-   github_reporter: 
+   github_reporter:
      job_types_to_report:
      - presubmit
      - postsubmit
@@ -55,6 +72,21 @@ Note: versions specified in these announcements may not include bug fixes made
 in more recent versions so it is recommended that the most recent versions are
 used when updating deployments.
 
+ - *May 2, 2019* All components exposing Prometheus metrics will now either push them
+   to the Prometheus PushGateway, if configured, or serve them locally on port 9090 at
+   `/metrics`, if not configured (the default).
+ - *April 26, 2019* `blunderbuss`, `approve`, and other plugins that read OWNERS
+   now treat `owners_dir_blacklist` as a list of regular expressions matched
+   against the entire (repository-relative) directory path of the OWNERS file rather
+   than as a list of strings matched exactly against the basename only of the directory
+   containing the OWNERS file.
+ - *April 2, 2019* `hook`, `deck`, `horologium`, `tide`, `plank` and `sinker` will no
+   longer provide a default value for the `--config-path` flag.
+   It is required to explicitly provide `--config-path` when upgrading to a new version of
+   these components that were previously relying on the default `--config-path=/etc/config/config.yaml`.
+ - *March 29, 2019* Custom logos should be provided as full paths in the configuration
+   under `deck.branding.logos` and will not implicitly be assumed to be under the static
+   assets directory.
  - *February 26, 2019* The `job_url_prefix` option from `plank` has been deprecated in
     favor of the new `job_url_prefix_config` option which allows configuration on a global,
     organization or repo level. `job_url_prefix` will be removed in September 2019.

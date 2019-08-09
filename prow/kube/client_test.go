@@ -36,7 +36,7 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 func getClient(url string) *Client {
@@ -62,113 +62,6 @@ func TestNamespace(t *testing.T) {
 	}
 	if c2.namespace != "ns2" {
 		t.Errorf("Got wrong namespace. Got %s, expected ns2", c2.namespace)
-	}
-}
-
-func TestSetHiddenReposProviderGet(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		switch r.URL.Path {
-		case "/apis/prow.k8s.io/v1/namespaces/ns/prowjobs/pja":
-			fmt.Fprint(w, `{"spec": {"job": "a", "refs": {"org": "org", "repo": "repo"}}}`)
-		case "/apis/prow.k8s.io/v1/namespaces/ns/prowjobs/pjb":
-			fmt.Fprint(w, `{"spec": {"job": "b", "refs": {"org": "hidden-org", "repo": "repo"}}}`)
-		default:
-			t.Errorf("Bad request path: %s", r.URL.Path)
-		}
-	}))
-	defer ts.Close()
-	c := getClient(ts.URL)
-	c.SetHiddenReposProvider(func() []string { return []string{"hidden-org"} }, false)
-	pj, err := c.GetProwJob("pja")
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	}
-	if got, expected := pj.Spec.Job, "a"; got != expected {
-		t.Errorf("Expected returned prowjob to be job %q, but got %q.", expected, got)
-	}
-
-	pj, err = c.GetProwJob("pjb")
-	if err == nil {
-		t.Fatal("Expected error getting hidden prowjob, but did not receive an error.")
-	}
-}
-
-func TestHiddenReposProviderGet(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		switch r.URL.Path {
-		case "/apis/prow.k8s.io/v1/namespaces/ns/prowjobs/pja":
-			fmt.Fprint(w, `{"spec": {"job": "a", "refs": {"org": "org", "repo": "repo"}}}`)
-		case "/apis/prow.k8s.io/v1/namespaces/ns/prowjobs/pjb":
-			fmt.Fprint(w, `{"spec": {"job": "b", "refs": {"org": "hidden-org", "repo": "repo"}}}`)
-		default:
-			t.Errorf("Bad request path: %s", r.URL.Path)
-		}
-	}))
-	defer ts.Close()
-	c := getClient(ts.URL)
-	c.SetHiddenReposProvider(func() []string { return []string{"hidden-org"} }, true)
-	pj, err := c.GetProwJob("pjb")
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	}
-	if got, expected := pj.Spec.Job, "b"; got != expected {
-		t.Errorf("Expected returned prowjob to be job %q, but got %q.", expected, got)
-	}
-}
-
-func TestSetHiddenReposProviderList(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		if r.URL.Path != "/apis/prow.k8s.io/v1/namespaces/ns/prowjobs" {
-			t.Errorf("Bad request path: %s", r.URL.Path)
-		}
-		fmt.Fprint(w, `{"items": [{"spec": {"job": "a", "refs": {"org": "org", "repo": "hidden-repo"}}}, {"spec": {"job": "b", "refs": {"org": "org", "repo": "repo"}}}]}`)
-	}))
-	defer ts.Close()
-	c := getClient(ts.URL)
-	c.SetHiddenReposProvider(func() []string { return []string{"org/hidden-repo"} }, false)
-	pjs, err := c.ListProwJobs(EmptySelector)
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	}
-	if len(pjs) != 1 {
-		t.Fatalf("Expected one prowjobs, but got %v.", pjs)
-	}
-	if got, expected := pjs[0].Spec.Job, "b"; got != expected {
-		t.Errorf("Expected returned prowjob to be job %q, but got %q.", expected, got)
-	}
-}
-
-func TestHiddenReposProviderList(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("Bad method: %s", r.Method)
-		}
-		if r.URL.Path != "/apis/prow.k8s.io/v1/namespaces/ns/prowjobs" {
-			t.Errorf("Bad request path: %s", r.URL.Path)
-		}
-		fmt.Fprint(w, `{"items": [{"spec": {"job": "a", "refs": {"org": "org", "repo": "hidden-repo"}}}, {"spec": {"job": "b", "refs": {"org": "org", "repo": "repo"}}}]}`)
-	}))
-	defer ts.Close()
-	c := getClient(ts.URL)
-	c.SetHiddenReposProvider(func() []string { return []string{"org/hidden-repo"} }, true)
-	pjs, err := c.ListProwJobs(EmptySelector)
-	if err != nil {
-		t.Errorf("Didn't expect error: %v", err)
-	}
-	if len(pjs) != 1 {
-		t.Fatalf("Expected one prowjobs, but got %v.", pjs)
-	}
-	if got, expected := pjs[0].Spec.Job, "a"; got != expected {
-		t.Errorf("Expected returned prowjob to be job %q, but got %q.", expected, got)
 	}
 }
 
@@ -357,7 +250,7 @@ func TestCreateConfigMap(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := getClient(ts.URL)
-	if _, err := c.CreateConfigMap(ConfigMap{}); err != nil {
+	if _, err := c.CreateConfigMap(v1.ConfigMap{}); err != nil {
 		t.Errorf("Didn't expect error: %v", err)
 	}
 }
@@ -374,7 +267,7 @@ func TestReplaceConfigMap(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := getClient(ts.URL)
-	if _, err := c.ReplaceConfigMap("config", ConfigMap{}); err != nil {
+	if _, err := c.ReplaceConfigMap("config", v1.ConfigMap{}); err != nil {
 		t.Errorf("Didn't expect error: %v", err)
 	}
 }

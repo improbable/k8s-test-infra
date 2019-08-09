@@ -2,3 +2,9 @@
 
 approvers:
 - calebamiles
+- justaugustus
+- tpepper
+
+labels:
+- sig/release
+- area/release-eng

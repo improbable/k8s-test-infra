@@ -44,7 +44,7 @@ set -o nounset
 # these can be overridden but otherwise default to the current stable image
 # used to build kubernetes from the master branch
 IMAGE_NAME="${IMAGE_NAME:-gcr.io/k8s-testimages/planter}"
-TAG="${TAG:-0.22.0}"
+TAG="${TAG:-0.23.0}"
 IMAGE=${IMAGE:-${IMAGE_NAME}:${TAG}${CROSS+-cross}}
 
 # We want to mount our bazel workspace and the bazel cache
@@ -69,7 +69,7 @@ RUN_OPTS="${RUN_OPTS} -it"
 RUN_OPTS="${RUN_OPTS} --hostname=planter"
 
 # - NOTE: SELinux disabled for this container to prevent relabeling $HOME (!)
-RUN_OPTS="${RUN_OPTS} --security-opt label:disable"
+RUN_OPTS="${RUN_OPTS} --security-opt label=disable"
 
 # - supply the host user's `id` info so we can run as the host user and create
 #   a matching environment for the purposes of building, see the Dockerfile and
