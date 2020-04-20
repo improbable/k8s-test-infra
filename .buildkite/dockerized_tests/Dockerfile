@@ -17,7 +17,7 @@ RUN apt-get -qq update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the requested version of bazel and stick it in the right place so that the tools/bazel script doesn't re-download the same version.
-ENV BAZEL_VERSION="0.27.0"
+ENV BAZEL_VERSION="2.2.0"
 RUN export BAZEL_INSTALL_DIR="/home/user/.bazel_installations/${BAZEL_VERSION}" \
     && curl -LSs -o /tmp/bazel.deb https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel_${BAZEL_VERSION}-linux-x86_64.deb \
     && dpkg -i /tmp/bazel.deb \
