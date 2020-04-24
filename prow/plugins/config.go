@@ -87,6 +87,7 @@ type Configuration struct {
 	Welcome                    []Welcome                    `json:"welcome,omitempty"`
 	Override                   Override                     `json:"override"`
 	JiraLinker                 JiraLinker                   `json:"jira_linker,omitempty"`
+	DefaultLabels              []DefaultLabels              `json:"default_labels,omitempty"`
 }
 
 // Golint holds configuration for the golint plugin
@@ -529,6 +530,15 @@ type JiraLinker struct {
 	JiraBaseUrl string `json:"jira_base_url"`
 }
 
+// DefaultLabels specifies a set of default labels for one or more orgs and/or repos.
+// The configuration for the default-labels plugin is defined as a list of these structures.
+type DefaultLabels struct {
+	// A list of one or more orgs and/or repos that this set of labels applies to.
+	Repos []string `json:"repos,omitempty"`
+	// A list of labels to apply to all PRs when they are opened.
+	Labels []string `json:"labels,omitempty"`
+}
+
 // Dco is config for the DCO (https://developercertificate.org/) checker plugin.
 type Dco struct {
 	// SkipDCOCheckForMembers is used to skip DCO check for trusted org members
@@ -716,6 +726,27 @@ func (c *Configuration) ApproveFor(org, repo string) *Approve {
 		a.DeprecatedReviewActsAsApprove = &no
 	}
 	return a
+}
+
+// DefaultLabelsFor finds the DefaultLabels for a repo, if defined
+// a DefaultLabel can be listed for the repo itself or for the
+// owning organization
+func (c *Configuration) DefaultLabelsFor(org, repo string) *DefaultLabels {
+	fullName := fmt.Sprintf("%s/%s", org, repo)
+	for _, defaultLabel := range c.DefaultLabels {
+		if !sets.NewString(defaultLabel.Repos...).Has(fullName) {
+			continue
+		}
+		return &defaultLabel
+	}
+	// If you don't find anything, loop again looking for an org config
+	for _, defaultLabel := range c.DefaultLabels {
+		if !sets.NewString(defaultLabel.Repos...).Has(org) {
+			continue
+		}
+		return &defaultLabel
+	}
+	return &DefaultLabels{}
 }
 
 // LgtmFor finds the Lgtm for a repo, if one exists
