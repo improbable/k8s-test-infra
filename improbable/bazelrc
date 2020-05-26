@@ -11,4 +11,5 @@ build:remote_cache --remote_upload_local_results=true
 build:remote_cache --google_default_credentials=true
 
 build:imp-release --config=imp-ci
+build:imp-release --remote_upload_local_results=false
 build:imp-release --platforms=@io_bazel_rules_go//go/toolchain:linux_amd64
