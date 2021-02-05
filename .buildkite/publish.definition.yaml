@@ -1,10 +1,10 @@
 ---
 agent_queue_id: trigger-pipelines
-description: Build and release the Docker images we use for Prow
+description: Build and publish the Docker images we use for Prow
 github:
   default_branch: improbable
 teams:
 - name: Everyone
   permission: BUILD_AND_READ
-- name: eng-foundation/eng-velocity
+- name: gen/team/engvelocity
   permission: MANAGE_BUILD_AND_READ

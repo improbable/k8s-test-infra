@@ -1,15 +1,20 @@
+# These settings should apply at all times
+common --announce_rc
+build --config=toplevel
+build --incompatible_strict_action_env=true
+build --google_default_credentials=true
+
+# imp-ci is the config to use when running any Improbable-fork build in CI
 common:imp-ci --curses=no
 common:imp-ci --noshow_loading_progress
 common:imp-ci --show_progress_rate_limit=2
-common:imp-ci --announce_rc
 
-build:imp-ci --config=remote_cache
+build:imp-ci --config=remote-cache-writer
 
-build:remote_cache --config=toplevel
-build:remote_cache --incompatible_strict_action_env=true
-build:remote_cache --remote_upload_local_results=true
-build:remote_cache --google_default_credentials=true
+# remote-cache-writer allows the client to write back to GCS instead of just reading
+# You probably want to include this in another config, instead of using it directly
+build:remote-cache-writer --remote_upload_local_results=true
 
+# imp-release is the config to use when building for release
 build:imp-release --config=imp-ci
-build:imp-release --remote_upload_local_results=false
 build:imp-release --platforms=@io_bazel_rules_go//go/toolchain:linux_amd64

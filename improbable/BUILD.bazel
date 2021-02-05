@@ -1,63 +1,85 @@
-load("@io_bazel_rules_docker//container:bundle.bzl", "container_bundle")
-load("@io_bazel_rules_docker//contrib:push-all.bzl", "docker_push")
-load("//prow:def.bzl", "prow_push", "tags")
+load("//prow:def.bzl", "prow_push")
 
 package(default_visibility = ["//visibility:public"])
 
-container_bundle(
-    name = "release-deck",
-    images = tags(
-        cmds = ["deck"],
-        targets = {},
-    ),
-)
-
-docker_push(
-    name = "release-push-deck",
-    bundle = ":release-deck",
-)
-
-container_bundle(
-    name = "release-hook",
-    images = tags(
-        cmds = ["hook"],
-        targets = {},
-    ),
-)
-
-docker_push(
-    name = "release-push-hook",
-    bundle = ":release-hook",
-)
-
-container_bundle(
-    name = "release-tide",
-    images = tags(
-        cmds = ["tide"],
-        targets = {},
-    ),
-)
-
-docker_push(
-    name = "release-push-tide",
-    bundle = ":release-tide",
-)
-
+# Build and push Deck
 prow_push(
+    name = "push-deck",
+    bundle_name = "deck",
+    images = {
+        "eu.gcr.io/windy-oxide-102215/deck:{DOCKER_TAG}": "//prow/cmd/deck:image",
+    },
+)
+
+# Build and push Hook
+prow_push(
+    name = "push-hook",
+    bundle_name = "hook",
+    images = {
+        "eu.gcr.io/windy-oxide-102215/hook:{DOCKER_TAG}": "//prow/cmd/hook:image",
+    },
+)
+
+# Build and push Tide
+prow_push(
+    name = "push-tide",
+    bundle_name = "tide",
+    images = {
+        "eu.gcr.io/windy-oxide-102215/tide:{DOCKER_TAG}": "//prow/cmd/tide:image",
+    },
+)
+
+# Build and push ghproxy
+prow_push(
+    name = "push-ghproxy",
+    bundle_name = "ghproxy",
+    images = {
+        "eu.gcr.io/windy-oxide-102215/ghproxy:{DOCKER_TAG}": "//ghproxy:image",
+    },
+)
+
+# Build and push label-sync
+prow_push(
+    name = "push-label-sync",
+    bundle_name = "label-sync",
+    images = {
+        "eu.gcr.io/windy-oxide-102215/label-sync:{DOCKER_TAG}": "//label_sync:image",
+    },
+)
+
+# Build and push needs-rebase
+prow_push(
+    name = "push-needs-rebase",
+    bundle_name = "needs-rebase",
+    images = {
+        "eu.gcr.io/windy-oxide-102215/needs-rebase:{DOCKER_TAG}": "//prow/external-plugins/needs-rebase:image",
+    },
+)
+
+filegroup(
     name = "improbable-push",
-    bundle_name = "improbable-release",
-    images = tags(
-        cmds = [
-            "deck",
-            "hook",
-            "tide",
-        ],
-        targets = {
-            "ghproxy": "//ghproxy:image",
-            "label_sync": "//label_sync:image",
-            "needs-rebase": "//prow/external-plugins/needs-rebase:image",
-        },
-    ),
+    srcs = [
+         ":push-deck",
+         ":push-hook",
+         ":push-tide",
+         ":push-ghproxy",
+         ":push-label-sync",
+         ":push-needs-rebase",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+filegroup(
+    name = "improbable-build",
+    srcs = [
+        ":deck",
+        ":ghproxy",
+        ":hook",
+        ":label-sync",
+        ":needs-rebase",
+        ":tide"
+    ],
+    visibility = ["//visibility:private"],
 )
 
 filegroup(
